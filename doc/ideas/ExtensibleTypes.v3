@@ -1,38 +1,45 @@
 //
-// Extensible types are the language-level feature related to run-time types.
+// Extensible types are a language-level feature related to run-time types.
 //
 
 // As proposed here, the resulting run-time setup is a little different from
-// that of the run-time types idea (as it currenty stands), but it is similar.
-// It is also related to the models idea.
+// that of RunTimeTypes.v3 (as it currenty stands), but it is similar.
+// It is also related to the models idea (Model.v3).
 
 // The extensible types idea involves adding two features to Virgil classes,
 // giving rise to two new flavors of classes: *extensible* classes and
 // *descriptor* classes.
 
-// An *extensible* class is one that may have new subtypes introduced at run
-// time.  We keep extensible and non-extensible types in separate class
+// An *extensible* class is one that may have new subclasses introduced at run
+// time.  Its instances have an associated metadata object: a descriptor,
+// which is an object of a *descriptor* class.
+
+// We keep extensible and non-extensible types in separate class
 // hierarchies, requiring that the root (top-level) class of an extensible
 // hierarchy have the keyword "extensible", such as:
 
 extensible class A { /* ... */ }
 
-// Subclasses of an extensible class are automatically extensible, and need
-// not, but may, be marked with the same keyword.
+// (The marking of extensible classes could also be done using a rephint, like
+// this: class A #extensible { /* ... */ } However, this violates the
+// principle that rephints affect only representations, not semantics.)
+
+// Virgil subclasses of an extensible class are automatically extensible, and
+// need not, but may, be marked with the "extensible" keyword.
 
 // The rationale for separating the hierarchies is that type queries, casts,
-// and method dispatch require different mechanisms for an extensible
-// collection of classes versus Virgil's current mechanisms for a closed world
-// of types.  The mechanism for non-extensible types uses a small integer
-// typeid in the object header to control dispatch and subtype operations, and
-// for GC these integers index a table of GC maps.  The proposed mechanism for
-// extensible types puts all that information is a separate descriptor object,
-// and instances of the extensible type point to that descriptor.  The
-// descriptor will contain the type id of the compile-time-known ancestor of
-// the type and the GC map for the specific extensible / extended type. We do
-// not want to slow down non-extensible types just to support extensible ones,
-// so we make a compile-time distinction between them - hence the separate
-// class hierarchies.  Here is an illustration:
+// and method dispatch require different mechanisms for an extensible class
+// versus Virgil's current mechanisms for a closed world of types.  The
+// mechanism for non-extensible types uses a small integer typeid in the
+// object header to control dispatch and subtype operations, and for GC these
+// integers index a table of GC maps.  The proposed mechanism for extensible
+// types puts all that information is a separate descriptor object, and
+// instances of the extensible type point to that descriptor.  The descriptor
+// will contain the type id of the compile-time-known ancestor of the type and
+// the GC map for the specific extensible / extended type.  We do not want to
+// slow down non-extensible types just to support extensible ones, so we make
+// a compile-time distinction between them - hence the separate class
+// hierarchies.  Here is an illustration:
 //
 // Instance of a non-extensible class:
 //
@@ -59,130 +66,402 @@ extensible class A { /* ... */ }
 //                       +  other fields ... +
 //                       +-------------------+
 // 
+// Note: The pointer is Pointer sized, of course, while a typeid is 32 bits.
+// Hence the header of an instance of an extensible class may be larger than
+// the header of an instance of a non-extensible class.
 
-//
 // Because the compiler / run-time system make assumptions about the special
 // fields built in at the beginning of descriptor objects, descriptor classes
-// need to be marked specially.  Here is an example:
+// need to be specially marked.  We have them indicate the extensible class
+// they describe, using the keyword "describes", thusly:
 
-descriptor class D { /* ... */ }
+class D describes A { /* ... */ }
+
+// As with the "extensible" keyword, this could be done using rephint syntax,
+// extended to allow parameters: class D #describes(C) { /* ... */ }
 
 // There is no problem allowing descriptor classes to themselves be
-// extensible; the two effects on object representation are independent.
+// extensible; the two effects on object representation are independent
+// (modulo dealing with the difference in size of a typeid vs a pointer to a
+// descriptor object).
 
-// Every extensible *class* has a unique descriptor *object*, which must be an
-// instance foa descriptor class.
+// Each instance of the descriptor class effectively creates a new "copy" of
+// the class it describes.  It is also fair to think of descriptor objects as
+// being run-time constructed classes, that is, instances of metaclass
+// classes.
 
-// To accomplish this for a compile-time known (ctk) class, such as A above,
-// we give the descriptor *object* as part of the declaration of A:
+// The mechanism can also be used to implement inner and outer classes: The
+// descriptor objects are then viewed as instances of an *outer* class with
+// the extensible class being an inner class.  Full implementation of
+// inner/outer classes would require additional compiler support, but the
+// run-time mechanisms proposed here, including the multiple-inner-classes
+// feature of descriptors described later, seem to provide much of the
+// necessary run time support.
 
-component DescObjects {
-    def ADesc = D.new( /* params */ );
-}
+// As far as mechanism goes, descriptors of multiple kinds could describe a
+// given extensible class.  The resulting run-time classes are distinct, but
+// their extensible class insstances have the same fields and methods
+// available.
 
-extensible class A descriptor DescObjects.ADesc { /* ... */ }
+// Creating instances
 
-// This construct reuses the "descriptor" keyword in the declaration of the
-// extensible class, to denote the class's descriptor object.  The compiler
-// + run-time connect the class and descriptor object together, an action
-// that must be done exactly once.  If the programmer does not supply a
-// descriptor object in the extensible class's declaration, the compiler
-// supplies a default object that provides just what the run-time needs.
+// It is helpful at this point to show how to create instance of extensible
+// classes.  Using the running example, we could write:
 
-// Now consider the run-time (rt) subclass case.  For that, we need to know
-// the superclass (really, its descriptor) and to have a descriptor object for
-// the new class.  CiRuntime.extendClass provides the means to extend a ctk
-// class; the return value indicates success;
+var adesc = D.new(d1, d2);
+var a = adesc.new(a1, a2, a3);
 
-def extendClass<C, D>(desc: D, fixed: Array<bool>, repeating: Array<bool>) -> bool;
+// Here, d1 and d2 are parameters to D's constructor and a1, a2, and a3 are
+// parameters to A's constructor.
 
-// "fixed" indicates, for each word being *added* in the subtype, whether it
-// is a reference (for the GC's use).  "repeating" does the same thing if an
-// array part is being added.  So that supertype fields, including the
-// possible array length field, do not move, nothing can be added to a
-// supertype that has an array part.  Subtypes need not add any new fields.  A
-// descriptor object can be used only once to connect with a class.  Each
-// extensible / extended class is connected with its descriptor when the class
-// itself is made.
+var adesc2 = D.new(d3, d4);
+var aa = adesc2.new(a4, a5, a6);
 
-// Lastly, we may wish to create an rt subclass of an rt class.  For that we
-// need the descriptor of the superclass rt class, for which we can use
-// CiRuntime.newSubclass:
+// For purposes of method dispatch, a and aa are viewed as having type A.
+// However, their types for purposes of querying and casting involve their
+// descriptors, and are thus considered different.
 
-def newSubclass<S, D>(superDesc: S, desc: D, fixed: Array<bool>, repeating: Array<bool>) -> bool;
+// Extending an extensible class
 
-// S is the type of the superclass's descriptor, which must be a descriptor
-// class, and D is the class of the descriptor for the new rt class.  "fixed"
-// and "repeating" are as for CiRuntime.extendClass.  Again, the return value
-// indicates success.
+// Actually extending an extensible class involves taking an existing
+// descriptor object and extending it to create a new descriptor object.  This
+// may add new (unnamed) fields to the class:
 
-// If an extensible class's descriptor object was supplied explicitly, one can
-// just as well use CiRuntime.newSubclass on the descriptor object or
-// CiRuntime.extendClass on the extensible class.  The result will be the
-// same.
+var sub_desc = adesc.extend([true, false, false], d5, d6);
 
-// There is no necessary type relationship between the descriptors of
-// subtypes/supertypes in the extensible/rt class hierarchy.  However, it may
-// be useful to use the same or related types.
+// The first argument is an Array<bool> indicating, for each added field, if
+// it is a reference (for the GC).  The remaining arguments are passed to the
+// constructor of the class of adesc.  Thus, the descriptor's new() is run in
+// the context of the added field information.
+
+// The more elaborate extendWithArray allows adding an array part to the
+// extended class.  Note that if an extended class already has an array part,
+// *no* new fields may be added when extending it.
+
+var sub_desc2 = adesc.extendWithArray([false, false], 0, [true]), d7, d8);
+
+// The second argument to extendWithArray is the size of each array element,
+// if an array of scalars is being added (1, 2, 4, or 8).  The third argument
+// is for adding an array of references or array of mixed elements (tuples);
+// the element size argument should be 0.  The format of the third argument is
+// like the first argument, an Array<bool>.  The remaining arguments are
+// passed to new().  A more minimal interface would eliminate "extend" and
+// rename "extendWithArray" to be "extend".
+
+// Examples:
+
+var sub1 = adesc.extendWithArray([false], 1, []); // scalar + array of byte
+var sub2 = adesc.extendWithArray([true], 4, []); // ref + array of int
+var sub3 = adesc.extendWithArray([false, false], 0, [true]); // two scalars + array of ref
+var sub4 = adesc.extendWithArray([], 0, [false]); // array of pointer-size scalars
+var sub5 = adesc.extendWithArray([], 0, [false, true, false]); // mixed array
+
+// We can create instances of the extended class just as for the original
+// class:
+
+var sub_a = sub_desc.new(a7, a8, a9);
+
+// If there is an array part, we use newArray, which prepends a length argument:
+
+var sub_aa = sub1.newArray(17, a10, a11, a12);
+
+// newarray() is necessary in addition to new() becuase there is no static way
+// to know whether a given descriptor object's described class has an array
+// part.
+
+// The fields added by an extend/extendWithArray subclass will be initialized
+// to default values (zeroes).
 
 
 //
-// Dealing with instances of rt classes
+// Dealing with instances of extended classes
 //
 
+// If A is an extensible class, then all the fields and methods of A as
+// declared in Virgil may be accessed as usual.  To access added fields, one
+// can use these new Pointer methods:
+
+// Pointer to first new fixed field
+Pointer.atExtension<A>(obj: A) -> Pointer;
+
+// Pointer to length of array part; NULL if there isn't one
+Pointer.atExtensionLength<A>(obj: A) -> Pointer;
+
+// Pointer to first array element; NULL if there isn't one
+Pointer.atExtensionArray<A>(obj: A) -> Pointer;
+
+// One can also obtain a reference to the descriptor of an instance of an
+// extensible class:
+
+var desc: Oop = a.descriptor();
+
+// Here Oop is a new type that denotes a reference to a heap object (possibly
+// null).  The only thing one can do with Oop's is compare them for equality
+// to null and each other and to do type queries and casts.  Unlike Pointers,
+// they are gc-safe because the system knows they are references that need to
+// be reported to the GC, etc.
+
+// Given a descriptor object one can obtain a reference map for (all of) the
+// extended fields (but, for safety, not the fields of the original extensible
+// class), and for any array extension:
+
+var fmap: array<bool> = desc.refMap();  // returns a read only array of bool
+var amap: array<bool> = desc.elementMap();  // useful if elementSize() == Pointer.SIZE; otherwise empty
+var esize = desc.elementSize();  // size of elements; 0 means no array part
+
+// Together, these features allow code to access extension fields with GC safety.
+// Fields may also be loaded with a degree of type safety:
+
+var fldsPtr = Pointer.atExtension(a);
+var fptr = fldsPtr + Pointer.SIZE * 2;  // third field
+var fld = FieldType.!(fptr.load<Oop>());  // get as Oop then cast
+
+// Optionally, we can considering adding a descriptor method that returns the
+// size of the added fixed part:
+
+var fsize = desc.fixedSize();
+
+// Extension type queries
+
+// If A is an extended class, instances created from descriptors that describe
+// A will all answer an A.? type query affirmatively, and an A.! cast will
+// succeed.  One can also check whether an instance was created from a given
+// descriptor (by using .descriptor()), but more interestingly one can also
+// check whether it was created from that descriptor *or* one created from it
+// (recursively) using "extend":
+
+... desc.?(a) ...
+
+// In contrast with queries, casting is not useful since it will not affect
+// the static type of the instance, etc.
+
+
+// Implementation design
+
+// Format of instances of extensible classes
+
+// The typeid field will be a pointer to the descriptor object.  It will be
+// recognizable by (a) having at least two low bits being 0, and (b) being
+// larger than any compiler generated typeid.  Thus the 00 case of typeid low
+// order bits will have an additional range check to separate static typeids
+// from those of extensible classes.  [NOTE: This seems to require expanding
+// the typeid field to Pointer size, unless we can devise some other way to
+// tell typeids and descriptor pointers apart.]
+
+// Format of instances of descriptor classes
+
+// The typeid field will be no different; if the decriptor class is itself
+// extensible, then it will be a pointer to the descriptor's descriptor, etc.
+
+// Following the descriptor's type id will be:
+
+// - Pointer to descriptor from which this descriptor was created using
+//   extend/extendWithArray; null if this decriptor was created directly with
+//   new() on its class.  This is the run-time superclass of this extended
+//   class.
+
+// - Described class's typeid.  This is always a typeid of a compile-time
+//   known class.
+
+// - Typemap of the extension.  This takes one of two forms:
+
+//   a) a reference to an object holding two typemaps, one for the fixed part
+//      and one for the array part.  This form is used when there is an array part,
+//      or when the fixed part is too large to fit in a single Pointer-size field.
+//   b) a typemap for a fixed part that fits in a single Pointer-size field, except
+//      that a low 1 bit is added to make this distinct from case (a).
+
+// - Optionally, the length of instances of the extensible class, the size of
+//   the fixed size part of the extended class, and the size of array elements
+//   of the extended class.  These are redundant but can speed operations up.
+
+
 //
-// Considerations of the run-time
+// Operations
+//
 
-// 1. Descriptor classes will reserve space for a GC type descriptor (bits to
-// identify size and pointer fields) in descriptor instances.  This will need
-// an extension mechanism to support descriptions requiring more than the
-// fixed space reserved.
 
-// 2. Descriptor instances must allow for a reference to the superclass
-// descriptor, to support type queries and casts.  The ctk types of a
-// hierarchy can have compiler-assigned ids, stored in their descriptor
-// objects, that allow faster checks.
+// D.new(...) on a descriptor class:
+//
+//   Allocates a descriptor instance and fills in the various fields to
+//   indicate that the extensible class instances have no additional fields.
+//   Runs D's constructor.  The hidden field contents can be determined by the
+//   compiler and code can be compiled inline for the whole operation.
 
-// 3. Descriptor instances indicate the type id of the ctk from which their
-// class is derived.  This supports type queries and casts against ctk class
-// types and also supports method dispatch.  (Since rt classes do not add
-// methods, there is no additional dispatch semantics for them.)
 
-// 4. The run-time can support:
+// desc.new(...) on a descriptor object:
+//
+//   Allocates an instance of the extended class, and calls the constructor of
+//   the extensible class.  If the size of instances is kept in the
+//   descriptor, then this can be compiled inline.
 
-// a) obtaining the descriptor object of an object of extensible / extended
-// class
 
-CiRuntime.getDescriptor<C, D>(obj: C) -> D;
+// desc.newArray(n, ...) on a descriptor object:
+//
+//   Computes size of the instance, fills in length, and calls the constructor
+//   of the extensible class.  If the size information is kept in the
+//   descriptor, then this can be compiled inline.
 
-// b) checking whether the class of an rt class instance is a subclass of some
-// other rt class (casting is not useful):
 
-CiRuntime.subtypeOf<C, D>(obj: C, desc: D) -> bool;
+// desc.extend() / desc.extendWithArray():
+//
+//   Let D be the static class of desc.  Allocates a new descriptor object of
+//   class D, calculates and fills in the hidden fields, and calls the
+//   constructor of class D.  (Uses the static class to be able to check the
+//   parameters to new().  The object 'desc' will still be the run-time
+//   superclass.)  This will likely involve an out-of-line call.
 
-// 4. Creating instances: For ctk classes, one can use the usual new.  For ctk
-// classes with known descriptor objects, or rt classes, one can use the
-// descriptor object to create a new instance:
 
-CiRuntime.newInstance<C, D, P>(desc: D, params: P) -> C;
+// Method dispatch
+//
+// On a non-extensible class: as before: use the typeid, minus an offset, to
+// index a dispatch table.
+//
+// On an extensible class: follow the descriptor pointer and fetch the
+// extensible class's typeid; use it as for the non-extensible case.
 
-// Here, C is a ctk extensible type, the nearest ctk superclass of the class
-// that "desc" describes.  D is the type of desc and P are the parameters to
-// pass to C.new().  Any fields added by rt subtypes from C down to the class
-// describes by D will set to default values.
 
-// Similarly one can create an instance of an rt class that has an array part:
+// Type query and cast: C.?(o) and C.!(o)
+//
+// If the extensibility of C and the static type of o differ, ? will always
+// return false and ! will fail.
+//
+// If their extensibility is the same and they are not extensible, do a null
+// check on o, then fetch its typeid and compare it with the valid range of
+// typeid's for C.
+//
+// If their extensibility is the same and they are extensible, do a null check
+// on o, then follow its descriptor pointer and fetch its extensible class
+// typeid.  Do a range check of that against the valid range for C (as in the
+// non-extensible case).
+//
+// If o is of type Oop, then we need to determine its extensibility at run
+// time and obtain its typeid accordingly.  The actual check proceeds as
+// usual.  It can possible be optimized based on the extensibility of C and
+// run-time determination of o's extensibility.
 
-CiRuntime.newArray<C, D, P>(desc: D, params: P, length: int) -> C;
 
-// 5. Accessing in instances of rt classes.  We can accomplish this by adding
-// a few ways to get Pointers to parts of an rt instance.  This can be
-// prettied up by having the programmer add functionality to descriptor
-// classes, which can add suitable bounds checks and a degree of type checking
-// on loads and stores.
+// Type query: desc.?(o)
+//
+// desc must be an instance of a descriptor class and o's static type must be
+// an extensible class (or Oop).  Starting with o's descriptor, we follow the
+// superclass descriptor chain looking for equality with desc.  If o is
+// non-extensible, return false.
 
-Pointer.atExtension<C>(obj: C) -> Pointer;  // Pointer to first new fixed field
 
-Pointer.atExtensionLength<C>(obj: C) -> Pointer;  // Pointer to length of array part
+//
+// Multiple inner classes
+//
 
-Pointer.atExtensionArray<C>(obj: C) -> Pointer;  // Pointer to first array element
+// The multiple inner classes extension to the design allows the same
+// descriptor object to describe and give an outer class context to multiple
+// inner classes.  First, we extend the "describes" syntax:
+
+class D describes (A, B) { /* ... */ }
+
+// Before, we reserved space in the descriptor for information about one inner
+// class.  We now reserve space for information about however many inner
+// classes are listed.
+
+// To create an instance, we need to say which described class we are
+// instantiating, using extended syntax:
+
+var desc = D.new();
+var a_inst = desc.A.new(...);  // or newArray, as the case may be
+
+// More subtly, perhaps, the extensible class instances cannot directly point
+// to desc, since then we could not tell instances of desc.A and desc.B apart.
+// Therefore, we arrange to have them point to their specific hidden
+// descriptive information *within* desc, and add to that information an
+// offset referring to the beginning of desc - so that descriptor(), and the
+// GC, can conveniently find the whole descriptor object.
+
+// extend and extendWithArray need to specify additions to each of the
+// described classes, in order.  For desc that would be additions to A and
+// then additions to B.  This is so that both can be extended at once.  The
+// variadic nature of extend/extendWithArray is unpleasant, of course.  An
+// better alternative is to give an array of arrays or array of tuples of the
+// necessary information.
+
+// Some other operations would need the specific class added:
+
+desc.A.refMap()
+desc.A.elementMap();
+desc.A.elementSize()
+desc.A.?
+
+
+//
+// Subclassing descriptor classes
+//
+
+// Suppose we have:
+
+class D describes A { ... }
+
+class D2 extends D { ... }
+
+// Does D2 necessarily describe the same (and possibly more) classes as D
+// does?  Since an instance of D2 can presumably be used in a type-safe way in
+// the manner that instances of D can, the answer to the question seems to be
+// "yes".  Therefore, we suggest that any "describes" clause in a descriptor
+// subclass *adds to* the list of described classes.
+
+// A thornier concern has to do with adding Virgil subclasses of A in the
+// example (as opposed to run-time extensions of A).  As things stand, a
+// descriptor describes specific classes and their *run-time* extensions only.
+// Those will all have the same *Virgil* fields and methods.  If we want to
+// get more code sharing of the same descriptor (source) code, we might do
+// something like this:
+
+class D<T> describes T { ... }
+
+// Then the same framework provided by the fields and methods of D could be
+// used across a range of types.  Since the type parameters are substituted at
+// compile time this kind fo structure should present no fundamental problems.
+
+
+// Summary of language / run-time changes:
+
+// "extensible" keyword/syntax
+// "describes" keyword/syntax
+
+// semantic and layout distinctions between ordinary, extensible, and
+// descriptor objects
+
+// desc.new(...) syntax and semantics
+// desc.newArray(len, ...) syntax and semantics
+
+// desc.extend(...) built-in function
+// desc.extendWithArray(...) built-in function [OPTIONAL]
+
+// Pointer.atExtension
+// Pointer.atExtensionLength
+// Pointer.atExtensionArray
+
+// obj.descriptor() built-in function
+// Oop type
+
+// desc.refMap() built-in function
+// desc.elementMap() built-in function
+// desc.elementSize() built-in function
+// desc.fixedSize() built-in function [OPTIONAL]
+// desc.?(o) built-in function
+
+
+// Further language changes for multiple inner classes
+
+// extended "describes" syntax
+// further object layout changes
+
+// desc.C.new() syntax and semantics
+// desc.C.newArray() syntax and semantics
+
+// updated desc.extend() syntax and semantics
+// updated desc.extendWithArray() syntax and semantics [OPTIONAL]
+
+// desc.C.refMap() syntax and semantics
+// desc.C.elementMap() syntax and semantics
+// desc.C.elementSize() syntax and semantics
+// desc.C.fixedSize() syntax and semantics [OPTIONAL]
+// desc.C.? syntax and semantics
