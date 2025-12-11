@@ -58,6 +58,7 @@ class Verifier(compiler: Compiler, prog: Program) {
 		if (ERROR.noErrors) forAll(vst.exports, addExport);
 
 		prog.wasmFuncId_internal = numImports;
+		prog.numImports = numImports;
 	}
 	def buildFile(file: VstFile) {
 		if (file == null) return;
@@ -231,13 +232,16 @@ class Verifier(compiler: Compiler, prog: Program) {
 		if (exportMap == null) {
 			exportMap = Strings.newMap();
 		} else {
-			var prev = exportMap[decl.token.image];
+//			var prev = exportMap[decl.token.image];
+			var prev = exportMap[decl.expname.image];
 			if (prev != null) {
-				cv.errAtDecl(decl).ExportDeclError(formatPrev("export redefined", prev.token));
+				cv.errAtToken(decl.expname).ExportDeclError(formatPrev("export redefined", prev.token));
 				return;
 			}
 		}
-		exportMap[decl.token.image] = decl;
+//		cv.errAtDecl(decl).ExportDeclError(formatPrev("export nname", decl.token));
+		exportMap[decl.expname.image] = decl;
+//		exportMap[decl.token.image] = decl;
 		var tc = TypeChecker.new(ERROR, cv.file);
 		tc.enterCompound(decl.synthetic, false, env);
 		tc.visitVar(decl.expr, null);
@@ -248,7 +252,7 @@ class Verifier(compiler: Compiler, prog: Program) {
 	def addExport(decl: ExportDecl) {
 		var binding = VarBinding.ComponentMethod.!(decl.expr.varbind);
 		var spec = VstIr.specOf(ir, binding.member.receiver.getDeclaredType(), binding.member, binding.typeArgs);
-		ir.addRoot(decl.expname, spec);
+		ir.addRoot(decl.expname.image, spec);
 	}
 	def verifyPacking(decl: VstPacking) {
 		var cv = decl.verifier;
