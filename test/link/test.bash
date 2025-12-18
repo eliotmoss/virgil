@@ -157,7 +157,7 @@ function link_target_tests() {
 		fi
 		echo "##>1"  # for progress
 		echo "##+$t" # for progress
-		if $CC $MODEL -no-pie -T $LD_SCRIPT "$obj" ${cobj:+"$cobj"} -o $OUT/$target/"${t/.v3/}"; then
+		if $CC $MODEL -no-pie -z noexecstack -T $LD_SCRIPT "$obj" ${cobj:+"$cobj"} -o $OUT/$target/"${t/.v3/}"; then
 			echo "##-ok" # for progress
 		else
 			echo "##-fail"

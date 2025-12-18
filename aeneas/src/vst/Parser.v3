@@ -383,7 +383,7 @@ component Parser {
 			}
 			if (expname != null && count > 1) {
 				var second = rev.tail.head;
-				p.errorAt(second.token.range(), "export with explict name applied to multiple declarations");
+				p.errorAt(second.token.range(), "export with explicit name applied to multiple declarations");
 			}
 			// Add exports in the right order.
 			for (l = rev; l != null; l = l.tail) {

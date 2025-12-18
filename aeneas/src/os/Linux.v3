@@ -186,28 +186,25 @@ class LinuxTarget extends Target {
 					var meth = cls.methods[j];
 					// only specifically defined/named methods can be imported
 					if (meth == null || meth.source == null) continue;
-					var methName = meth.source.name();
+					var source = meth.source;
+					var methName = source.name();
 					var addr = mach.methodMap[meth];
 					if (addr == null || addr.absolute < 0) {
-						// TODO: fill in other fields
-						prog.ERROR.addError(null, null, "Imported method is undefined", methName);
+						prog.ERROR.addError(source.token.range(), null, "ImportError: imported method is undefined", methName);
 						continue;
 					}
 					// imported name: compImport.methImport, or just methImport if compImport is empty
-					var methImportToken = meth.source.importName;
+					var methImportToken = source.importName;
 					if (methImportToken != null) methName = methImportToken.image;
 					var sep = if(importToken.image.length > 0, ".", "");
 					var fullName = StringBuilder.new().puts(importToken.image).puts(sep).puts(methName).extract();
-					if (importNames.has(fullName)) {
-						// TODO: fill in other fields
-						prog.ERROR.addError(null, null, "Duplicate import name", fullName);
-					}
 					anySymbols = true;
 					importAddrs[addr.absolute] = sections.queueUndefSymbol(fullName, long.!(space.addressSize));
 					importLocs[addr.absolute] = null;
 					importNames[fullName] = ();
 				}
 			}
+			prog.ERROR.report();
 		}
 		if (anySymbols) mach.importLocs = importLocs;
 
@@ -272,25 +269,17 @@ class LinuxTarget extends Target {
 					var exp = exports[i];
 					var name = exp.name;
 					var meth = exp.spec.asMethod();
+					var range = if(meth.source != null, meth.source.token.range());
 					var addr = mach.methodMap[meth];
 					if (addr == null || addr.absolute < 0) {
-						prog.ERROR.addError(null, null, "Exported method is undefined", name);
-						continue;
-					}
-					if (importNames.has(name)) {
-						prog.ERROR.addError(null, null, "Exported method is imported", name);
-						continue;
-					}
-					if (exportAddrs.has(name)) {
-						if (exportAddrs[name].absolute != addr.absolute) {
-							prog.ERROR.addError(null, null, "Duplicate export name", name);
-						}
+						prog.ERROR.addError(range, null, "ExportDeclError: exported method is undefined", name);
 						continue;
 					}
 					exportAddrs[name] = addr;
 					anySymbols = true;
 					sections.addFuncSymbol(w, name, addr);
 				}
+				prog.ERROR.report();
 			}
 
 			if ((haveExports || haveImports) && main != null && !exportAddrs.has("main")) {
