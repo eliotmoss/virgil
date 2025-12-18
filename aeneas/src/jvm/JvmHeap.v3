@@ -128,6 +128,10 @@ class JvmHeap(jprog: JvmProgram) {
 				ovf_method.setFlag(true, JvmConstant.ACC_STATIC);
 
 				// Split previous method at last split point
+				if (last_split_pos < 0) {
+					jprog.context.fail("heap initialization too big and could not split");
+					continue;
+				}
 				var ovf_code = clinit_code.splitAt(last_split_pos);
 
 				// Finish previous method
@@ -161,7 +165,7 @@ class JvmHeap(jprog: JvmProgram) {
 	private def makeField(jrec: JvmHI_Record) {
 		if (jrec.fname == null) {
 			jrec.fname = Strings.format1("r%d", fieldID++);
-			var fld = heapBuilder.newField(jrec.fname, jrec.jtype.descriptor());
+			var fld = heapBuilder.newField(jrec.fname, jrec.jtype.getDescriptor());
 			fld.setFlag(true, JvmConstant.ACC_STATIC);
 		}
 	}
