@@ -5,6 +5,6 @@
 // test receiving and calling a C function at run time
 
 export def callIncr(fp: Pointer, x: int) -> int {
-	var f: int -> int = CiRuntime.forgeClosure<int -> int, int, int>(fp, null);
+	var f: int -> int = CiRuntime.forgeClosure(fp, ());
 	return f(x);
 }

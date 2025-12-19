@@ -6,6 +6,6 @@
 def incr(x: int) -> int { return x + 1; }
 
 export def getIncr() -> Pointer {
-	var closure = CiRuntime.unpackClosure<int -> int, int, int>(incr);
+	var closure: (Pointer, void) = CiRuntime.unpackClosure(incr);
 	return closure.0;
 }
