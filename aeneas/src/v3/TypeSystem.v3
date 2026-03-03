@@ -34,7 +34,9 @@ component TypeSystem {
 	// Check if the type {xt} is an enum and the type {yt} is its corresponding set type.
 	def isEnumToSet(xt: Type, yt: Type) -> bool {
 		if (EnumType.?(xt) && EnumSetType.?(yt)) {
-			return EnumType.!(xt).enumDecl == EnumSetType.!(yt).enumDecl;
+			var xd = EnumType.!(xt).enumDecl;
+			var yd = EnumSetType.!(yt).enumDecl;
+			return xd == yd || isEnumSubtypeOf(xd, yd);
 		}
 		return false;
 	}
@@ -115,7 +117,7 @@ component TypeSystem {
 				}
 			}
 			x: EnumType => match (yt) {
-				y: EnumSetType => if (x.enumDecl == y.enumDecl) return Conversion.PROMOTE_ENUM_TO_SET;
+				y: EnumSetType => if (x.enumDecl == y.enumDecl || isEnumSubtypeOf(x.enumDecl, y.enumDecl)) return Conversion.PROMOTE_ENUM_TO_SET;
 				y: EnumType => if (isEnumSubtypeOf(x.enumDecl, y.enumDecl)) return Conversion.SUBSUME_VARIANT;
 			}
 			x: FloatType => match (yt) {

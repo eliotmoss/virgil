@@ -200,7 +200,6 @@ class VstEnum extends VstCompound {
 	new(isPrivate: bool, name: Token, params: VstList<ParamDecl>, cases, members: List<VstMember>)
 		super(isPrivate, name, null, params, null, members) {
 		tagType = V3.getTagType(cases.length);
-		// XXX: move type creation somewhere else?
 		typeCon = TypeCon.new(token.image, Kind.ENUM, 0, TypeUtil.globalCache);
 		var enumType = EnumType.new(typeCon.uid, this, typeCon);
 		typeCon.singleton = enumType;

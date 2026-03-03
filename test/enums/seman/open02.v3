@@ -1,5 +1,5 @@
-//@seman = EnumSetError @ 5:16
-// Open enum: .set type not allowed
+//@seman
+// Open enum: .set type is now allowed
 enum E { A, B, _ }
 component C {
     def f() -> E.set { return E.A; }

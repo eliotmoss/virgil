@@ -306,11 +306,6 @@ class MethodEnv {
 		// lookup (type: enum).name
 		var name = expr.ident.name.image;
 		if (Strings.equal(name, "set")) {
-			if (enumType.enumDecl.hasDefault) {
-				verifier.errAtRange(expr.range()).set("EnumSetError",
-					Strings.format1("open enum %q (has '_ case') does not support '.set'", enumType.render));
-				return VarBinding.None;
-			}
 			var left = NamedTypeRef.new(null, VarExpr.!(expr.expr).ident.name, null);
 			var tref = NamedTypeRef.new(left, expr.ident.name, null);
 			verifier.getEnumSetType(tref, enumType);
@@ -542,12 +537,12 @@ class MethodEnv {
 		var name = expr.ident.name.image;
 		var tc = EnumSetType.!(etype);
 		if (Strings.equal(name, "all")) {
-			return expr.bind(null, VarBinding.Const(tc.repType.max, etype), etype);
+			return expr.bind(null, VarBinding.Const(tc.allVal, etype), etype);
 		}
-		var c = tc.enumDecl.memberMap[name];
-		if (VstEnumCase.?(c)) {
+		var c = findEnumCaseInHierarchy(tc.enumDecl, name);
+		if (c != null) {
 			// simple membership check
-			var op = V3Op.newVstSugar(VstOperator.EnumSetHas(VstEnumCase.!(c)), TypeUtil.NO_TYPES, [etype], Bool.TYPE);
+			var op = V3Op.newVstSugar(VstOperator.EnumSetHas(c), TypeUtil.NO_TYPES, [etype], Bool.TYPE);
 			return expr.bind(null, VarBinding.Inst(op, N), op.sig.funcType());
 		}
 		return VarBinding.None;
@@ -555,13 +550,22 @@ class MethodEnv {
 	def lookupEnumSetExprMember(expr: VarExpr, etype: Type) -> VarBinding {
 		var name = expr.ident.name.image;
 		var tc = EnumSetType.!(etype);
-		var c = tc.enumDecl.memberMap[name];
-		if (VstEnumCase.?(c)) {
+		var c = findEnumCaseInHierarchy(tc.enumDecl, name);
+		if (c != null) {
 			// simple membership check
-			var op = V3Op.newVstSugar(VstOperator.EnumSetHas(VstEnumCase.!(c)), TypeUtil.NO_TYPES, [etype], Bool.TYPE);
+			var op = V3Op.newVstSugar(VstOperator.EnumSetHas(c), TypeUtil.NO_TYPES, [etype], Bool.TYPE);
 			return expr.bind(expr.expr, VarBinding.Apply(op, N), Bool.TYPE);
 		}
 		return VarBinding.None;
+	}
+	def findEnumCaseInHierarchy(decl: VstEnum, name: string) -> VstEnumCase {
+		var m = decl.memberMap[name];
+		if (VstEnumCase.?(m)) return VstEnumCase.!(m);
+		for (l = decl.subtypeOrder; l != null; l = l.tail) {
+			var c = findEnumCaseInHierarchy(l.head, name);
+			if (c != null) return c;
+		}
+		return null;
 	}
 	def lookupRefTypeMember(expr: VarExpr, refType: RefType) -> VarBinding {
 		var name = expr.ident.name.image;

@@ -74,6 +74,7 @@ class EnumType extends PrimType {
 class EnumSetType extends PrimType {
 	def enumDecl: VstEnum;
 	def repType: IntType;
+	var allVal: Val;
 	private var cache: V3EnumSet_OpCache;
 
 	new(hash: int, enumDecl, repType, typeCon: TypeCon) super(hash, typeCon, repType.width, null) { }

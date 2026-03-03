@@ -25,13 +25,13 @@ class Verifier(compiler: Compiler, prog: Program) {
 		var vst = prog.vst;
 		for (f in vst.files) buildFile(f);
 		forAll(vst.classes, resolveSuperClass);
-		forAll(vst.components, verifyComponent);
-		forAll(vst.classes, verifyClass);
-		forAll(vst.classes, assignVariantTagsIfRoot);
 		forAll(vst.enums, verifyEnum);
 		forAll(vst.enums, verifyEnumQualifiers);
 		forAll(vst.enums, assignEnumTagsIfRoot);
 		forAll(vst.enums, finalizeEnumType);
+		forAll(vst.components, verifyComponent);
+		forAll(vst.classes, verifyClass);
+		forAll(vst.classes, assignVariantTagsIfRoot);
 		forAll(vst.layouts, verifyLayout);
 		forAll(vst.exports, verifyExport);
 		forAll(vst.packings, verifyPacking);
@@ -541,7 +541,51 @@ class Verifier(compiler: Compiler, prog: Program) {
 		}
 	}
 	def finalizeEnumType(decl: VstEnum) {
-		// Currently a no-op; reserved for future per-enum finalization.
+		if (decl.qualifiers != null) return;  // only process from root
+		var enumType = EnumType.!(decl.typeCon.singleton);
+		var isHierarchy = decl.hasDefault || decl.subtypeOrder != null;
+		if (!isHierarchy) {
+			// Non-hierarchy enum: constructor-created set type is correct.
+			if (enumType.setType != null) enumType.setType.allVal = enumType.setType.repType.max;
+			return;
+		}
+		// Hierarchy enum: recreate set type with DFS-aware sizing.
+		var totalTags = if(decl.enumTagHi >= 0, decl.enumTagHi + 1, decl.cases.length);
+		if (totalTags > Int.MAX_WIDTH) {
+			enumType.setType = null;  // too large for set
+			return;
+		}
+		if (totalTags == 0) totalTags = 1;
+		var repType = Int.getType(false, totalTags);
+		var setName = Strings.builderOf(decl.token.image).puts(".set").toString();
+		var tc = TypeCon.new(setName, Kind.ENUM_SET, 0, TypeUtil.globalCache);
+		var enumSetType = EnumSetType.new(tc.uid, decl, repType, tc);
+		tc.singleton = enumSetType;
+		enumType.setType = enumSetType;
+		// Compute allVal: union of (1 << c.enumTag) for all named cases.
+		enumSetType.allVal = computeEnumSetAll(decl, repType);
+		// Propagate shared set type to subtypes.
+		propagateEnumSetType(decl, enumSetType);
+	}
+	def computeEnumSetAll(decl: VstEnum, repType: IntType) -> Val {
+		var bits: long = 0;
+		for (c in decl.cases) {
+			if (c.enumTag >= 0 && !Strings.equal(c.name(), "_")) {
+				bits = bits | (1L << u6.!(c.enumTag));
+			}
+		}
+		for (l = decl.subtypeOrder; l != null; l = l.tail) {
+			var sub = computeEnumSetAll(l.head, repType);
+			if (repType.width <= 32) bits = bits | long.!(Int.unbox(sub));
+			else bits = bits | Long.unboxSU(sub, repType.signed);
+		}
+		return if(repType.width <= 32, Int.box(int.!(bits)), Long.box(bits));
+	}
+	def propagateEnumSetType(decl: VstEnum, setType: EnumSetType) {
+		for (l = decl.subtypeOrder; l != null; l = l.tail) {
+			EnumType.!(l.head.typeCon.singleton).setType = setType;
+			propagateEnumSetType(l.head, setType);
+		}
 	}
 	def verifyLayout(decl: VstLayout) {
 		var cv = decl.verifier;
@@ -1297,11 +1341,6 @@ class VstCompoundVerifier {
 		return tref.binding = getErrorType();
 	}
 	def getEnumSetType(tref: TypeRef, enumType: EnumType) -> Type {
-		if (enumType.enumDecl.hasDefault) {
-			errAtRange(tref.range()).set("EnumSetError",
-				Strings.format1("open enum %q (has '_ case') does not support '.set'", enumType.render));
-			return tref.binding = getErrorType();
-		}
 		if (enumType.setType == null) {
 			errAtRange(tref.range()).EnumSetTooLarge(enumType, tref, enumType.enumDecl.cases.length);
 			return tref.binding = getErrorType();
