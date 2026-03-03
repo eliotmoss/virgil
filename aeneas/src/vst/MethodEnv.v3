@@ -327,11 +327,6 @@ class MethodEnv {
 		// lookup (type: enum).name
 		var name = expr.ident.name.image;
 		if (Strings.equal(name, "set")) {
-			if (enumType.enumDecl.hasDefault) {
-				verifier.errAtRange(expr.range()).set("EnumSetError",
-					Strings.format1("open enum %q (has '_ case') does not support '.set'", enumType.render));
-				return VarBinding.None;
-			}
 			var left = NamedTypeRef.new(null, VarExpr.!(expr.expr).ident.name, null);
 			var tref = NamedTypeRef.new(left, expr.ident.name, null);
 			verifier.getEnumSetType(tref, enumType);
