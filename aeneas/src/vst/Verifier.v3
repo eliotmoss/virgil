@@ -1571,6 +1571,11 @@ class VstCompoundVerifier {
 		return tref.binding = getErrorType();
 	}
 	def getEnumSetType(tref: TypeRef, enumType: EnumType) -> Type {
+		if (enumType.enumDecl.hasDefault) {
+			errAtRange(tref.range()).set("EnumSetError",
+				Strings.format1("open enum %q (has '_ case') does not support '.set'", enumType.render));
+			return tref.binding = getErrorType();
+		}
 		if (enumType.setType == null) {
 			errAtRange(tref.range()).EnumSetTooLarge(enumType, tref, enumType.enumDecl.cases.length);
 			return tref.binding = getErrorType();
