@@ -29,6 +29,9 @@ class Verifier(compiler: Compiler, prog: Program) {
 		forAll(vst.classes, verifyClass);
 		forAll(vst.classes, assignVariantTagsIfRoot);
 		forAll(vst.enums, verifyEnum);
+		forAll(vst.enums, verifyEnumQualifiers);
+		forAll(vst.enums, assignEnumTagsIfRoot);
+		forAll(vst.enums, finalizeEnumType);
 		forAll(vst.layouts, verifyLayout);
 		forAll(vst.exports, verifyExport);
 		forAll(vst.packings, verifyPacking);
@@ -123,11 +126,23 @@ class Verifier(compiler: Compiler, prog: Program) {
 		if (constructor != null && VstComponent.?(decl)) addInit(constructor);
 	}
 	def addEnumVals(decl: VstEnum) {
+		if (decl.qualifiers != null) {
+			// Subtype enum: if it has params, add its constructor to init list so it can
+			// fill the root enum's param arrays (using the DFS enumTag indices).
+			if (decl.params != null) {
+				var ic = prog.ir.makeIrClass(decl.getDeclaredType());
+				var constructor = ic.methods[0];
+				if (constructor != null) addInit(constructor);
+			}
+			return;
+		}
 		if (decl.params == null) return;
+		// Root enum: size param arrays to cover all DFS-assigned tags (including subtypes).
+		var arraySize = if(decl.enumTagHi >= 0, decl.enumTagHi + 1, decl.cases.length);
 		for (l = decl.params.list; l != null; l = l.tail) {
 			var field = VstField.!(l.head.member);
 			var arrayType = V3Array.newType(field.getType());
-			field.enumVals = prog.newRecord(arrayType, decl.cases.length);
+			field.enumVals = prog.newRecord(arrayType, arraySize);
 		}
 		var ic = prog.ir.makeIrClass(decl.getDeclaredType());
 		var constructor = ic.methods[0];
@@ -426,6 +441,108 @@ class Verifier(compiler: Compiler, prog: Program) {
 		var cv = decl.verifier;
 		cv.verify();
 	}
+	def verifyEnumQualifiers(decl: VstEnum) {
+		var q = decl.qualifiers;
+		if (q == null) return;  // no qualifiers → root enum, nothing to resolve
+		var cv = decl.verifier;
+		// Resolve first qualifier: must be a top-level (root) enum.
+		var firstTok = q.head;
+		var tc = prog.typeEnv.lookup(firstTok.image);
+		if (tc == null || tc.kind != Kind.ENUM) {
+			cv.errAtDecl(decl).set("EnumDeclError",
+				Strings.format1("qualifier \"%s\" does not name an enum type", firstTok.image));
+			return;
+		}
+		var parentDecl = EnumType.!(tc.create0()).enumDecl;
+		if (parentDecl.qualifiers != null) {
+			cv.errAtDecl(decl).set("EnumDeclError",
+				Strings.format1("\"%s\" must be a top-level enum type", firstTok.image));
+			return;
+		}
+		q = q.tail;
+		// Walk any remaining qualifiers (for names like E1.More.Sub).
+		while (q != null) {
+			if (!parentDecl.hasDefault) {
+				cv.errAtToken(q.head).set("EnumDeclError",
+					Strings.format1("enum \"%s\" has no '_ case' to allow subtypes", parentDecl.name()));
+				return;
+			}
+			var tok = q.head;
+			if (parentDecl.subtypes == null || parentDecl.subtypes[tok.image] == null) {
+				cv.errAtToken(tok).set("EnumDeclError",
+					Strings.format1("qualifier \"%s\" is not a declared subtype enum", tok.image));
+				return;
+			}
+			parentDecl = parentDecl.subtypes[tok.image];
+			q = q.tail;
+		}
+		// parentDecl is the immediate parent of decl.
+		if (!parentDecl.hasDefault) {
+			cv.errAtDecl(decl).set("EnumDeclError",
+				Strings.format1("enum \"%s\" has no '_ case' to allow subtypes", parentDecl.name()));
+			return;
+		}
+		var declName = decl.name();
+		// Name must not clash with a named case of the parent (excluding _).
+		for (c in parentDecl.cases) {
+			if (!Strings.equal(c.name(), "_") && Strings.equal(c.name(), declName)) {
+				cv.errAtDecl(decl).set("EnumDeclError",
+					Strings.format2("subtype name \"%s\" conflicts with case of \"%s\"",
+						declName, parentDecl.name()));
+				return;
+			}
+		}
+		// Name must be unique among direct subtypes of the parent.
+		if (parentDecl.subtypes == null) parentDecl.subtypes = Strings.newMap();
+		if (parentDecl.subtypes[declName] != null) {
+			cv.errAtDecl(decl).set("EnumDeclError",
+				Strings.format2("subtype \"%s\" of \"%s\" declared more than once",
+					declName, parentDecl.name()));
+		} else {
+			parentDecl.subtypes[declName] = decl;
+			parentDecl.subtypeOrder = List.new(decl, parentDecl.subtypeOrder);
+		}
+	}
+	def assignEnumTagsIfRoot(decl: VstEnum) {
+		if (decl.qualifiers != null) return;  // skip subtype enums
+		var nextTag = 0;
+		nextTag = assignEnumTagsDFS(decl, nextTag);
+		// Recompute the tag type to fit all newly assigned tags.
+		var total = nextTag;
+		var width = 1, exp = 2;
+		while (exp < total) { exp = exp << 1; width++; }
+		var tagType = Int.getType(false, byte.!(width));
+		propagateEnumTagType(decl, tagType);
+	}
+	def assignEnumTagsDFS(decl: VstEnum, nextTag: int) -> int {
+		decl.enumTagLo = nextTag;
+		// Assign named cases (excluding _) in declaration order.
+		for (c in decl.cases) {
+			if (Strings.equal(c.name(), "_")) continue;
+			c.enumTag = nextTag++;
+		}
+		var defaultLo = nextTag;
+		// Recurse into subtypes in declaration order (subtypeOrder is reverse-decl, so reverse it).
+		var subtypes = Lists.reverse(decl.subtypeOrder);
+		for (l = subtypes; l != null; l = l.tail) {
+			nextTag = assignEnumTagsDFS(l.head, nextTag);
+		}
+		// Assign _ case's enumTag to the start of subtype range (inclusive low bound).
+		for (c in decl.cases) {
+			if (Strings.equal(c.name(), "_")) c.enumTag = defaultLo;
+		}
+		decl.enumTagHi = nextTag - 1;
+		return nextTag;
+	}
+	def propagateEnumTagType(decl: VstEnum, tagType: IntType) {
+		decl.tagType = tagType;
+		for (l = decl.subtypeOrder; l != null; l = l.tail) {
+			propagateEnumTagType(l.head, tagType);
+		}
+	}
+	def finalizeEnumType(decl: VstEnum) {
+		// Currently a no-op; reserved for future per-enum finalization.
+	}
 	def verifyLayout(decl: VstLayout) {
 		var cv = decl.verifier;
 		var size = tryUnboxPositiveInt(decl.size, -1);
@@ -587,6 +704,7 @@ class Verifier(compiler: Compiler, prog: Program) {
 		tc.typeCheckBody(cdecl.func.body);
 	}
 	def typeCheckEnumCase(decl: VstEnum, c: VstEnumCase, tc: TypeChecker) {
+		if (Strings.equal(c.name(), "_")) return;  // _ case has no args
 		var cv = decl.verifier;
 		var paramTypes: List<Type>;
 		if (decl.params != null) {
@@ -1094,7 +1212,7 @@ class VstCompoundVerifier {
 						}
 					}
 				} else if (EnumType.?(leftType)) {
-					// Enum.set resolution.
+					// Enum.set or Enum.SubtypeEnum resolution.
 					var enumType = EnumType.!(leftType);
 					if (Strings.equal(x.name.image, "set")) {
 						if (x.nested != null) {
@@ -1102,6 +1220,34 @@ class VstCompoundVerifier {
 								x.name.image, 0, x.nested.length());
 						}
 						return getEnumSetType(x, enumType);
+					}
+					// Check if name is a subtype enum.
+					if (enumType.enumDecl.subtypes != null) {
+						var subDecl = enumType.enumDecl.subtypes[x.name.image];
+						if (subDecl != null) {
+							if (x.nested != null) {
+								errAtRange(x.name.range()).TypeParamArityError("enum subtype",
+									x.name.image, 0, x.nested.length());
+							}
+							return x.binding = subDecl.typeCon.create0();
+						}
+					}
+					// Fall back: subtypes map may not be populated yet (early type resolution).
+					var subTc = verifier.prog.typeEnv.lookup(x.name.image);
+					if (subTc != null && subTc.kind == Kind.ENUM) {
+						var subDecl = EnumType.!(subTc.create0()).enumDecl;
+						if (subDecl.qualifiers != null) {
+							// Accept if qualifiers start with the parent enum's name.
+							var q = subDecl.qualifiers;
+							while (q.tail != null) q = q.tail;
+							if (Strings.equal(q.head.image, enumType.enumDecl.name())) {
+								if (x.nested != null) {
+									errAtRange(x.name.range()).TypeParamArityError("enum subtype",
+										x.name.image, 0, x.nested.length());
+								}
+								return x.binding = subDecl.typeCon.create0();
+							}
+						}
 					}
 				}
 				if (x.left != null) {
@@ -1151,9 +1297,14 @@ class VstCompoundVerifier {
 		return tref.binding = getErrorType();
 	}
 	def getEnumSetType(tref: TypeRef, enumType: EnumType) -> Type {
+		if (enumType.enumDecl.hasDefault) {
+			errAtRange(tref.range()).set("EnumSetError",
+				Strings.format1("open enum %q (has '_ case') does not support '.set'", enumType.render));
+			return tref.binding = getErrorType();
+		}
 		if (enumType.setType == null) {
 			errAtRange(tref.range()).EnumSetTooLarge(enumType, tref, enumType.enumDecl.cases.length);
-			return getErrorType();
+			return tref.binding = getErrorType();
 		}
 		return tref.binding = enumType.setType;
 	}
@@ -1684,9 +1835,21 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 		if (ve.expr != null) {
 			return errAtExpr(ve).MatchError(Strings.format1("match on type %q requires unqualified case", vt.render));
 		}
-		var vc = vt.lookupCase(ve.ident.name.image);
+		var name = ve.ident.name.image;
+		var vc = vt.lookupCase(name);
 		if (vc == null) {
-			return errAtExpr(ve).MatchError(Strings.format2("unresolved case %q.%s", vt.render, ve.ident.name.image));
+			// Not a named case; check if it names a direct subtype enum.
+			if (vt.enumDecl.subtypes != null) {
+				var subtypeDecl = vt.enumDecl.subtypes[name];
+				if (subtypeDecl != null) {
+					pat.subtypeEnumType = EnumType.!(subtypeDecl.typeCon.singleton);
+					return;
+				}
+			}
+			return errAtExpr(ve).MatchError(Strings.format2("unresolved case %q.%s", vt.render, name));
+		}
+		if (Strings.equal(vc.name(), "_")) {
+			return errAtExpr(ve).MatchError(Strings.format1("cannot explicitly match '_ case' of enum %q; use a default arm instead", vt.render));
 		}
 		mv.addEnumPattern(pat, vc);
 	}
@@ -2729,7 +2892,7 @@ class MatchStmtVerifier(etype: Type, tc: TypeChecker) {
 			MatchError(pat.expr.range(), "duplicate case", covered[vc.tag].expr.range());
 		}
 		covered[vc.tag] = pat;
-		pat.val = Int.box(vc.tag);
+		pat.val = Int.box(vc.enumTag);  // use DFS global tag for runtime comparison
 	}
 	def addTypePattern(pat: MatchPattern, t: Type) {
 		var cast = TypeSystem.newTypeCast(etype, t);
@@ -2766,6 +2929,8 @@ class MatchStmtVerifier(etype: Type, tc: TypeChecker) {
 	def end(stmt: MatchStmt) {
 		if (covered == null) return;
 		if (default != null) {
+			// Open enums always have potential uncovered values (from subtypes); default is always reachable.
+			if (enumType != null && enumType.enumDecl.hasDefault) return;
 			for (p in covered) {
 				if (p == null) return;
 			}
@@ -2783,15 +2948,23 @@ class MatchStmtVerifier(etype: Type, tc: TypeChecker) {
 				}
 			}
 		}
+		// If the enum has "case _", the match must have a default _ case.
+		if (enumType != null && enumType.enumDecl.hasDefault) {
+			MatchError(stmt.range(),
+				Strings.format1("match on open enum type %q requires a default case", enumType.render),
+				null);
+			return;
+		}
 		var buf: StringBuilder;
 		for (i < covered.length) {
 			if (covered[i] == null) {
 				var t = if(variantType == null, enumType, variantType);
 				if (buf == null) buf = StringBuilder.new().put1("match on type %q does not cover:", t.render);
-				var name = if(variantType == null,
+				// Skip the _ case — it cannot be explicitly matched.
+				var caseName = if(variantType == null,
 					enumType.enumDecl.cases[i].name(),
 					variantType.classDecl.cases[i].name());
-				buf.puts(" ").puts(name);
+				if (!Strings.equal(caseName, "_")) buf.puts(" ").puts(caseName);
 			}
 		}
 		if (buf != null) MatchError(stmt.range(), buf.toString(), null);

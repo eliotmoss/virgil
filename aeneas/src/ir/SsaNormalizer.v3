@@ -1092,6 +1092,23 @@ class SsaRaNormalizer extends SsaRebuilder {
 					}
 					return opAnd(left, check);
 				}
+				if (EnumType.?(atn.oldType) && EnumType.?(rtn.oldType)) {
+					// Enum subtype range test: lo <= tag <= hi.
+					var aDecl = EnumType.!(atn.oldType).enumDecl;
+					var rDecl = EnumType.!(rtn.oldType).enumDecl;
+					var actualTag = ai_old[offset];  // enum value IS its tag integer
+					var tagType = IntType.!(aDecl.tagType);
+					var lo = rDecl.enumTagLo, hi = rDecl.enumTagHi;
+					var check: SsaInstr;
+					if (lo == hi) {
+						check = curBlock.pure(V3Op.newIntEq(tagType), [actualTag, newGraph.intConst(lo)]);
+					} else {
+						var chkLo = curBlock.pure(tagType.opLtEq(), [newGraph.intConst(lo), actualTag]);
+						var chkHi = curBlock.pure(tagType.opLtEq(), [actualTag, newGraph.intConst(hi)]);
+						check = curBlock.opBoolAnd0(chkLo, chkHi);
+					}
+					return opAnd(left, check);
+				}
 				// break
 			}
 			_ => ; // break

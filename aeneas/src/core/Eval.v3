@@ -126,6 +126,12 @@ component Eval {
 				return b == null;
 			}
 			CLASS_QUERY, VARIANT_QUERY => {
+				if (EnumType.?(tt)) {
+					// enum subtype query: check integer tag is in [enumTagLo, enumTagHi]
+					var decl = EnumType.!(tt).enumDecl;
+					var tagVal = Int.unbox(val);
+					return tagVal >= decl.enumTagLo && tagVal <= decl.enumTagHi;
+				}
 				if (val == null) return false;
 				if (tt.open()) return false;
 				return Record.?(val) && TypeSystem.isSubtype(Record.!(val).rtype, tt);

@@ -116,6 +116,7 @@ component TypeSystem {
 			}
 			x: EnumType => match (yt) {
 				y: EnumSetType => if (x.enumDecl == y.enumDecl) return Conversion.PROMOTE_ENUM_TO_SET;
+				y: EnumType => if (isEnumSubtypeOf(x.enumDecl, y.enumDecl)) return Conversion.SUBSUME_VARIANT;
 			}
 			x: FloatType => match (yt) {
 				y: FloatType => if (x.width <= y.width) return Conversion.PROMOTE_FLOAT_TO_FLOAT;
@@ -498,6 +499,11 @@ component TypeSystem {
 				return TypeQuery.FLOAT_QUERY_D;
 			}
 		}
+		if (EnumType.?(fromType) && EnumType.?(toType)) {
+			// Enum subtype query: E1.More.?(x) where E1.More is a subtype of E1.
+			if (isEnumSubtypeOf(EnumType.!(toType).enumDecl, EnumType.!(fromType).enumDecl)) return TypeQuery.VARIANT_QUERY;
+			return TypeQuery.FALSE;
+		}
 		return maybeQuery(fromType, toType, TypeQuery.TRUE, TypeQuery.FALSE);
 	}
 	def newTypeCast(fromType: Type, toType: Type) -> TypeCast {
@@ -777,4 +783,17 @@ def mergeConversions(a: Conversion, b: Conversion) -> Conversion {
 		else if (isSubsume0(b)) a = Conversion.SUBSUME_TUPLE;
 	}
 	return a;
+}
+// Returns true if {sub} is a (direct or transitive) subtype enum of {sup}.
+// Uses the subtypeOrder lists populated by the verifier (no prog access needed).
+def isEnumSubtypeOf(sub: VstEnum, sup: VstEnum) -> bool {
+	if (sub.qualifiers == null) return false;  // root enums are not subtypes
+	return enumAncestorHasSubtype(sup, sub);
+}
+def enumAncestorHasSubtype(ancestor: VstEnum, target: VstEnum) -> bool {
+	for (l = ancestor.subtypeOrder; l != null; l = l.tail) {
+		if (l.head == target) return true;
+		if (enumAncestorHasSubtype(l.head, target)) return true;
+	}
+	return false;
 }

@@ -441,6 +441,22 @@ component Parser {
 		return true;
 	}
 	def parseEnum(p: ParserState, file: VstFile, isPrivate: bool) -> bool {
+		// Parse an optional dotted qualifier prefix (e.g. "E1." in "enum E1.More") then
+		// the enum name as a plain identifier (no type params, unlike variants).
+		var qualifiers: List<Token>;
+		var d = p.input;
+		while (Char.isIdentStart(p.curByte)) {
+			var q = p.curPos + 1;
+			while (q < d.length && Char.isIdentMiddle(d[q])) q++;
+			if (q < d.length && d[q] == '.' && q + 1 < d.length && Char.isIdentStart(d[q + 1])) {
+				var qid = parseIdentVoid(p);
+				p.advance1();
+				qualifiers = List.new(qid.name, qualifiers);
+			} else {
+				break;
+			}
+		}
+		qualifiers = Lists.reverse(qualifiers);
 		var id = parseIdentVoid(p);
 		var params = parseOptionalParams(p, parseEnumParam);
 		// Synthesize "tag" and "name" members
@@ -451,19 +467,30 @@ component Parser {
 		list = List.new(VstVariantNameMember.new(nameToken), list);
 		// Parse case members
 		var cases = Vector<VstEnumCase>.new();
+		var hasDefault = false;
 		p.req1('{');
 		while (true) {
 			if (p.curByte == '}') { p.advance1(); break; }
 			var c = parseEnumCase(p, cases.length);
 			if (c == null) { p.opt1('}'); break; }
+			if (Strings.equal(c.name(), "_")) hasDefault = true;
 			cases.put(c);
 			list = List.new(c, list);
+			if (hasDefault) { p.req1('}'); break; }  // _ must be last case
 		}
 		var decl = VstEnum.new(isPrivate, id.name, params, cases.extract(), list);
+		decl.hasDefault = hasDefault;
+		decl.qualifiers = qualifiers;
 		file.enums.put(decl);
 		return true;
 	}
 	def parseEnumCase(p: ParserState, tag: int) -> VstEnumCase {
+		// Handle "_" default case specially (not an identifier start in Virgil).
+		if (p.curByte == '_' && !Char.isIdentMiddle(p.peek(1))) {
+			var ut = p.token(1);
+			p.opt1(',');
+			return VstEnumCase.new(tag, ut, null);
+		}
 		var id = parseIdentVoid(p);
 		var args = if(p.curByte == '(', parseList(0, p, '(', COMMA, ')', parseExpr));
 		p.opt1(',');
