@@ -1,0 +1,10 @@
+//@execute 0=10; 1=20; 2=0; 3=0; 4=0
+// Open enum: enum params only on root (subtype cases use default param value)
+enum E1(x: int) { A(10), B(20), _ }
+enum E1.More { C, D }
+def main(x: int) -> int {
+    var cases: Array<E1> = [E1.A, E1.B, E1.More.C, E1.More.D];
+    if (x < 0 || x >= cases.length) return 0;
+    var e: E1 = cases[x];
+    return e.x;  // A=10, B=20, More.C=0(default), More.D=0(default)
+}
