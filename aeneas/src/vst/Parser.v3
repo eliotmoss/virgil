@@ -458,7 +458,41 @@ component Parser {
 		}
 		qualifiers = Lists.reverse(qualifiers);
 		var id = parseIdentVoid(p);
-		var params = parseOptionalParams(p, parseEnumParam);
+		var superParams = false;
+		var params: VstList<ParamDecl>;
+		if (p.curByte == '(') {
+			var d = p.input;
+			var q = p.curPos + 1;
+			while (q < d.length && (d[q] == ' ' || d[q] == '\t')) q++;
+			if (q + 5 <= d.length && d[q] == 's' && d[q+1] == 'u' && d[q+2] == 'p'
+				&& d[q+3] == 'e' && d[q+4] == 'r'
+				&& (q + 5 >= d.length || !Char.isIdentMiddle(d[q+5]))) {
+				var r = q + 5;
+				while (r < d.length && (d[r] == ' ' || d[r] == '\t')) r++;
+				if (r < d.length && d[r] == ')') {
+					// (super) only
+					p.advance1();
+					optKeyword(p, "super");
+					p.req1(')');
+					superParams = true;
+				} else if (r < d.length && d[r] == ',') {
+					// (super, extra_params...)
+					p.advance1();             // consume '('
+					optKeyword(p, "super");   // consume 'super'
+					p.advance1();             // consume ','
+					var paramList: List<ParamDecl>;
+					paramList = List.new(parseEnumParam(p), paramList);
+					while (p.curByte == ',') {
+						p.advance1();
+						paramList = List.new(parseEnumParam(p), paramList);
+					}
+					p.req1(')');
+					params = VstList.new(id.name.range(), Lists.reverse(paramList));
+					superParams = true;
+				}
+			}
+		}
+		if (!superParams) params = parseOptionalParams(p, parseEnumParam);
 		// Synthesize "tag" and "name" members
 		var tagToken = Token.new(p.fileName, "tag", p.curLine, p.curCol);
 		var nameToken = Token.new(p.fileName, "name", p.curLine, p.curCol);
@@ -480,6 +514,7 @@ component Parser {
 		}
 		var decl = VstEnum.new(isPrivate, id.name, params, cases.extract(), list);
 		decl.hasDefault = hasDefault;
+		decl.superParams = superParams;
 		decl.qualifiers = qualifiers;
 		file.enums.put(decl);
 		return true;
