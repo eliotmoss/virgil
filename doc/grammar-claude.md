@@ -66,6 +66,7 @@ EnumCaseMethod ::= ['private'] 'def' DefDef
 
 EnumMethod  ::= ['private'] 'def' DefDef                // shared by all cases; may be overridden per-case
 
+
 EnumParams  ::= '(' 'super' ')'                      // inherit parent's params
               | '(' 'super' ',' ParamDecl,+ ')'       // inherit parent's params + add new fields
               | '(' ParamDecl,* ')'                    // declare params (root or restate + optional extras)
@@ -109,19 +110,13 @@ An `EnumMethod` declared after the `;` separator is shared by all cases. It may 
 - Dispatch on a variable of enum type is virtual: the override for the specific case is called at runtime.
 - Static dispatch on a known case (e.g. `E.A.m()`) calls the override directly if one exists.
 
-Methods may also be declared using dotted-def syntax outside the enum body:
-
-```
-enum E { A, B }
-def E.m() -> int { return 42; }
-```
-
 ### Enum method inheritance
 
 - Methods declared on a parent enum are inherited by all subtype enums (transitively).
 - A subtype enum may override an inherited method by declaring a method with the same name and signature after its own `;` separator.
 - Individual cases of a subtype may further override methods via `EnumCaseBody`.
 - All virtual dispatch goes through the root enum's dispatch table, regardless of where the override is declared.
+
 
 ### Enum match pattern semantics
 
