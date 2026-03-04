@@ -364,6 +364,11 @@ class MethodEnv {
 			x: VstEnumCase => {
 				return expr.bind(null, VarBinding.EnumConst(x), enumType);
 			}
+			x: VstMethod => {
+				var methodReceiver = x.receiver.getDeclaredType();
+				var memberType = Function.prependParamType(methodReceiver, member.memberType);
+				return expr.bind(null, VarBinding.ClassMethod(methodReceiver, x, member.typeArgs), memberType);
+			}
 		}
 		return VarBinding.None;
 	}
@@ -375,17 +380,22 @@ class MethodEnv {
 		}
 		var member = resolveEnumMember(expr, enumType, name.image);
 		if (member == null) return VarBinding.None;
+		var receiver = objExpr(useThis, expr.ident.name, expr);
 		match (member.member) {
 			x: VstField => {
-				return expr.bind(expr.expr, VarBinding.Apply(enumType.enumGetParamOperator(x), N), member.memberType);
+				return expr.bind(receiver, VarBinding.Apply(enumType.enumGetParamOperator(x), N), member.memberType);
 			}
 			x: VstVariantTagMember => {
 				var tagType = enumType.enumDecl.tagType;
-				return newApplyCompBinding(expr, expr.expr, V3Op.newVstSugar(VstOperator.Nop,
+				return newApplyCompBinding(expr, receiver, V3Op.newVstSugar(VstOperator.Nop,
 					[enumType, tagType], [enumType], tagType));
 			}
 			x: VstVariantNameMember => {
-				return newApplyCompBinding(expr, expr.expr, enumType.getNameOperator());
+				return newApplyCompBinding(expr, receiver, enumType.getNameOperator());
+			}
+			x: VstMethod => {
+				var methodReceiver = x.receiver.getDeclaredType();
+				return expr.bind(receiver, VarBinding.ObjectMethod(methodReceiver, x, member.typeArgs), member.memberType);
 			}
 		}
 		return VarBinding.None;
@@ -425,6 +435,7 @@ class MethodEnv {
 				var n = if(idx < names.values.length, names.values[idx], null);
 				return expr.bind(null, VarBinding.Const(n, V3.stringType), V3.stringType);
 			}
+			x: VstMethod => return lookupEnumExprMember(expr, enumType, false);
 		}
 		return lookupEnumExprMember(expr, enumType, false);
 	}

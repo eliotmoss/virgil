@@ -322,7 +322,7 @@ class WasmCodeGen extends SsaMachGen {
 					dfnAll(i);
 				} else {
 					var rt = i.input1().getType();
-					if (rt == m.receiver) {
+					if (rt == m.receiver || EnumType.?(m.receiver)) {
 						start = 1;  // just push the receiver as is
 						dfnAll(i);
 					} else {
@@ -360,7 +360,7 @@ class WasmCodeGen extends SsaMachGen {
 					dfnAll(i);
 				} else {
 					var rt = i.input1().getType();
-					if (rt == m.receiver) {
+					if (rt == m.receiver || EnumType.?(m.receiver)) {
 						start = 1;  // just push the receiver as is
 						dfnAll(i);
 					} else {
