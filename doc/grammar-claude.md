@@ -66,7 +66,6 @@ EnumCaseMethod ::= ['private'] 'def' DefDef
 
 EnumMethod  ::= ['private'] 'def' DefDef                // shared by all cases; may be overridden per-case
 
-
 EnumParams  ::= '(' 'super' ')'                      // inherit parent's params
               | '(' 'super' ',' ParamDecl,+ ')'       // inherit parent's params + add new fields
               | '(' ParamDecl,* ')'                    // declare params (root or restate + optional extras)
