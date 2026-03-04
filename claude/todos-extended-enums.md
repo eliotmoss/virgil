@@ -22,22 +22,26 @@ in these stages:
    - Extend the syntax
    - Extend the semantic checking
    - Add implmentation for .shortName
-3. Allow methods for enum types.
+3. Allow methods for enum types. [DONE]
    Example: enum E1 { A { def m1() => 1; }, B, _ { def m2() -> bool; }; def m1() => 0; }
      Note that the enum's methods are separated from its cases by a ';'.
    Overriding should be analogous to open variant types.
    Todos:
    - [x] Extend the syntax (sub-stage 3.1: enum-level methods after ';')
    - [x] Extend the semantic checking (sub-stage 3.1: basic method resolution)
-   - [ ] Per-case overrides (sub-stage 3.2)
-   - [ ] Subtype method inheritance with overrides (sub-stage 3.3)
-   - Implementation may be helped by inventing *boxed enum objects*, for use when forming closures of enum methods.
-     - A boxed enum can have a single field, holding the enum's tag value.
-     - Method dispatch can be done using the enum tag value.
-     - A pre-constructed global array indexed by enum tag can be used to get
-       an enum's boxed value, when needed
-     - Enum values should usually be unboxed, represented by their enum tag value
-     - Enum fields should continue to be held in global arrays indexed by enum tag value
+   - [x] Per-case overrides (sub-stage 3.2: parse `{ def ... }` on cases, verify overrides)
+   - [x] Virtual dispatch via dispatch table (sub-stage 3.2: ArrayGetElem + CallFunctionDirect)
+   - [x] Static dispatch for known cases (sub-stage 3.2: E.A.m() binds directly to override)
+   - [x] Wasm/wasm-gc backend support (indirect adapters, sig handling, no Oop for enums)
+   - [x] Subtype method inheritance with overrides (sub-stage 3.3)
+   - [x] Method closures (sub-stage 3.4: `var f = e.m; f()`)
+   - Implementation note: dispatch uses tag-indexed array of function values (no boxed enum
+     objects needed). The tag type is prepended to the method's normalized function type.
+     CallFunctionDirect (no Oop prepend) is used instead of CallFunction for enum dispatch.
+   - Closure note: VariantGetMethod/VariantGetVirtual/VariantGetSelector ops are shared
+     between variants and enums. Enum values are integers (not Records), so the interpreter,
+     optimizer constant-fold, and optimizer CallClosure handler all need EnumType guards.
+     The optimizer must also set O_NO_NULL_CHECK for enum receivers (tag 0 is valid).
 4. Allow subtypes to redeclare supertype fields [DONE]
    Given supertype enum E3(x: int) { A(1), B(17), _ }, example subtype
    declarations:

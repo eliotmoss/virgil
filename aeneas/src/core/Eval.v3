@@ -781,16 +781,31 @@ def evalOp(op: Operator, args: Arguments) -> Result {
 			return if(object != null, object.values[field.index]);
 		}
 		VariantGetMethod(method) => {
+			var ta = args.getTypeArgs();
+			if (EnumType.?(ta[0])) {
+				var spec = lookupEnumVirtual(args, method);
+				return Closure.new(args.vals[0], spec);
+			}
 			var object = args.r(0);
 			var spec = getIrSpec(method, args);
 			return Closure.new(object, spec);
 		}
 		VariantGetVirtual(method) => {
+			var ta = args.getTypeArgs();
+			if (EnumType.?(ta[0])) {
+				var spec = lookupEnumVirtual(args, method);
+				return Closure.new(args.vals[0], spec);
+			}
 			var object = getRecordReceiver(args);
 			var spec = lookupVariantVirtual(args, object, method);
 			return Closure.new(object, spec);
 		}
 		VariantGetSelector(selector) => {
+			var ta = args.getTypeArgs();
+			if (EnumType.?(ta[0])) {
+				var spec = lookupEnumVirtual(args, selector);
+				return FuncVal.new(spec);
+			}
 			var object = getRecordReceiver(args);
 			var spec = lookupVariantVirtual(args, object, selector);
 			return FuncVal.new(spec);
@@ -865,11 +880,21 @@ def evalOp(op: Operator, args: Arguments) -> Result {
 			return args.tailCall(spec, object, 1, args.vals.length);
 		}
 		CallVariantVirtual(method) => {
+			var ta = args.getTypeArgs();
+			if (EnumType.?(ta[0])) {
+				var spec = lookupEnumVirtual(args, method);
+				return args.tailCall(spec, args.vals[0], 1, args.vals.length);
+			}
 			var object = getRecordReceiver(args);
 			var spec = lookupVariantVirtual(args, object, method);
 			return args.tailCall(spec, object, 1, args.vals.length);
 		}
 		CallVariantSelector(selector) => {
+			var ta = args.getTypeArgs();
+			if (EnumType.?(ta[0])) {
+				var spec = lookupEnumVirtual(args, selector);
+				return args.tailCall(spec, args.vals[0], 1, args.vals.length);
+			}
 			var object = getRecordReceiver(args);
 			var spec = lookupVariantVirtual(args, object, selector);
 			return args.tailCall(spec, object, 1, args.vals.length);
@@ -1076,6 +1101,19 @@ def lookupClassVirtual(args: Arguments, object: Record, member: IrMember) -> IrS
 	if (object != null) return args.getProgram().ir.resolveMethodImpl(object.rtype, getIrSpec(member, args));
 	args.throw(V3Exception.NullCheck, null);
 	return null;
+}
+def lookupEnumVirtual(args: Arguments, member: IrMember) -> IrSpec {
+	var ta = args.getTypeArgs();
+	var baseSpec = IrSpec.new(ta[0], ta, member);
+	var tag = Int.unbox(args.vals[0]);
+	if (IrMethod.?(member)) {
+		var rootVst = IrMethod.!(member).source;
+		if (rootVst != null && rootVst.enumCaseIrs != null && tag < rootVst.enumCaseIrs.length) {
+			var overrideIr = rootVst.enumCaseIrs[tag];
+			if (overrideIr != null) return IrSpec.new(ta[0], ta, overrideIr);
+		}
+	}
+	return baseSpec;
 }
 def lookupVariantVirtual(args: Arguments, object: Record, member: IrMember) -> IrSpec {
 	if (object != null) return args.getProgram().ir.resolveMethodImpl(object.rtype, getIrSpec(member, args));

@@ -1,0 +1,10 @@
+//@execute 0=10; 1=10; 2=99
+// Subtype override via dotted def, virtual dispatch through parent
+enum E { A, B, _ }
+enum E.More { C }
+def E.m() -> int { return 10; }
+def E.More.m() -> int { return 99; }
+def main(i: int) -> int {
+    var vals: Array<E> = [E.A, E.B, E.More.C];
+    return vals[i].m();
+}

@@ -27,6 +27,7 @@ class Verifier(compiler: Compiler, prog: Program) {
 		forAll(vst.classes, resolveSuperClass);
 		forAll(vst.enums, verifyEnum);
 		forAll(vst.enums, verifyEnumQualifiers);
+		forAll(vst.enums, fixEnumMethodRoots);
 		forAll(vst.enums, assignEnumTagsIfRoot);
 		forAll(vst.enums, finalizeEnumType);
 		forAll(vst.components, verifyComponent);
@@ -451,6 +452,35 @@ class Verifier(compiler: Compiler, prog: Program) {
 		var cv = decl.verifier;
 		cv.verify();
 	}
+	def fixEnumMethodRoots(decl: VstEnum) {
+		// After verifyEnumQualifiers sets parentEnum, fix method root pointers
+		// for subtype enums. During verifyEnum, parentEnum isn't set yet, so
+		// checkMethod treats subtype override methods as roots (root = self).
+		if (decl.parentEnum == null) return;
+		var cv = decl.verifier;
+		for (l = decl.members; l != null; l = l.tail) {
+			if (!VstMethod.?(l.head)) continue;
+			var m = VstMethod.!(l.head);
+			if (m.root != m) continue; // already correctly set
+			var parentMethod = cv.findEnumMethodInParents(VstEnum.!(cv.compound), m.name());
+			if (parentMethod != null) {
+				m.root = parentMethod.root;
+				m.index = parentMethod.index;
+			}
+		}
+		// Also fix per-case method overrides.
+		for (c in decl.cases) {
+			if (c.members == null) continue;
+			for (l = c.members; l != null; l = l.tail) {
+				if (!VstMethod.?(l.head)) continue;
+				var m = VstMethod.!(l.head);
+				// Case overrides should point to the ultimate root.
+				if (m.root != null && m.root.root != null && m.root != m.root.root) {
+					m.root = m.root.root;
+				}
+			}
+		}
+	}
 	def verifyEnumQualifiers(decl: VstEnum) {
 		var q = decl.qualifiers;
 		if (q == null) return;  // no qualifiers → root enum, nothing to resolve
@@ -790,6 +820,20 @@ class Verifier(compiler: Compiler, prog: Program) {
 				}
 			}
 		}
+		// Type-check per-case method override bodies.
+		if (VstEnum.?(decl)) {
+			for (c in VstEnum.!(decl).cases) {
+				if (c.members == null) continue;
+				for (l = c.members; l != null; l = l.tail) {
+					if (VstMethod.?(l.head)) {
+						var m = VstMethod.!(l.head);
+						if (m.root == m) continue; // error in verification; skip body
+						tc.enterMethod(m, env);
+						if (!EmptyStmt.?(m.func.body)) tc.typeCheckBody(m.func.body);
+					}
+				}
+			}
+		}
 	}
 	def typeCheckNew(decl: VstCompound, cdecl: VstNew, tc: TypeChecker) {
 		var cv = decl.verifier, thisParam = cv.newThisParam(), pl = cdecl.func.params;
@@ -1060,6 +1104,12 @@ class VstCompoundVerifier {
 				x: VstLayoutField => checkLayoutField(x);
 			}
 		}
+		// Verify per-case method overrides for enums.
+		if (VstEnum.?(compound)) {
+			for (c in VstEnum.!(compound).cases) {
+				if (c.members != null) checkEnumCaseMembers(c);
+			}
+		}
 		if (compound.constructor != null) {
 			compound.constructor.memberinits = Lists.reverse(memberinits);
 		}
@@ -1179,6 +1229,16 @@ class VstCompoundVerifier {
 		}
 		var binding = lookupSuperMember(decl.name());
 		if (binding == null) {
+			// Check parent enum chain for subtype enum method overrides.
+			if (VstEnum.?(compound) && VstEnum.!(compound).parentEnum != null) {
+				var parentMethod = findEnumMethodInParents(VstEnum.!(compound), decl.name());
+				if (parentMethod != null) {
+					decl.root = parentMethod.root;
+					decl.index = parentMethod.index;
+					verifier.methodOverrideChecks = List.new((this, decl), verifier.methodOverrideChecks);
+					return;
+				}
+			}
 			decl.root = decl;
 			decl.index = compound.numMethods++;
 			return;
@@ -1251,6 +1311,13 @@ class VstCompoundVerifier {
 	}
 	def checkMethodOverride(decl: VstMethod) {
 		var binding = lookupSuperMember(decl.name()); // re-resolve member after return type inference
+		if (binding == null) {
+			// Enum case override: compare directly against root method.
+			if (decl.root != null && decl.root != decl) {
+				checkEnumCaseMethodOverride(decl);
+			}
+			return;
+		}
 		var superDecl = VstMethod.!(binding.member);
 		var superMethodType = binding.memberType;
 		var methodType = decl.getType();
@@ -1278,6 +1345,62 @@ class VstCompoundVerifier {
 		if (!TypeSystem.isSubtype(methodType, superMethodType)) {
 			errAtDecl(decl).InheritanceError2("method signature %s cannot override %s", methodType, superMethodType);
 		}
+	}
+	def checkEnumCaseMembers(c: VstEnumCase) {
+		for (l = c.members; l != null; l = l.tail) {
+			match (l.head) {
+				x: VstMethod => checkEnumCaseMethod(x, c);
+				_ => errAtDecl(l.head).set("EnumDeclError", "only 'def' allowed in enum case body");
+			}
+		}
+	}
+	def checkEnumCaseMethod(decl: VstMethod, ecase: VstEnumCase) {
+		decl.receiver = compound;
+		// Look up the root method in the enum's member map or parent chain.
+		var rootMember = compound.memberMap[decl.name()];
+		if ((rootMember == null || !VstMethod.?(rootMember)) && VstEnum.?(compound)) {
+			var pm = findEnumMethodInParents(VstEnum.!(compound), decl.name());
+			if (pm != null) rootMember = pm;
+		}
+		if (rootMember == null || !VstMethod.?(rootMember)) {
+			errAtDecl(decl).set("EnumDeclError",
+				Strings.format1("case method \"%s\" does not override an enum-level method", decl.name()));
+			decl.root = decl;
+			return;
+		}
+		var rootMethod = VstMethod.!(rootMember);
+		decl.root = rootMethod.root;
+		decl.index = rootMethod.index;
+		// Check parameters.
+		typeEnv = compound.typeEnv;
+		if (decl.func.params.list != null) {
+			var map = Strings.newMap<Decl>();
+			Lists.apply(decl.func.params.list, checkMethodParam(_, map));
+		}
+		match (decl.func.rettype) {
+			Explicit(tref) => resolveType(tref, typeEnv);
+			Implicit(expr) => ;
+			_ => ;
+		}
+		// Defer override signature check until after body inference.
+		verifier.methodOverrideChecks = List.new((this, decl), verifier.methodOverrideChecks);
+	}
+	def checkEnumCaseMethodOverride(decl: VstMethod) {
+		var rootMethod = decl.root;
+		var superMethodType = rootMethod.getType();
+		var methodType = decl.getType();
+		if (superMethodType != null && methodType != null && !TypeSystem.isSubtype(methodType, superMethodType)) {
+			errAtDecl(decl).InheritanceError2("method signature %s cannot override %s", methodType, superMethodType);
+		}
+	}
+	def findEnumMethodInParents(decl: VstEnum, name: string) -> VstMethod {
+		var cur = decl.parentEnum;
+		while (cur != null) {
+			var member = cur.memberMap[name];
+			if (member != null && VstMethod.?(member)) return VstMethod.!(member);
+			cur = cur.parentEnum;
+		}
+		return null;
 	}
 	def checkParam(param: ParamDecl, map: Map<string, Decl>) {
 		if (map[param.name()] != null) errAtDecl(param).ParamDeclError(Strings.format1("parameter \"%s\" redefined", param.name()));

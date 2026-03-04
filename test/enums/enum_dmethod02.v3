@@ -1,0 +1,15 @@
+//@execute 0=1; 1=0; 2=0; 3=77
+// Mixed in-body and dotted-def methods with overrides
+enum E { A { def m() -> int { return 1; } }, B, _; def m() -> int { return 0; } }
+enum E.Extra { X }
+def E.Extra.m() -> int { return 77; }
+def main(i: int) -> int {
+    var vals: Array<E> = [E.A, E.B, E.Extra.X, E.Extra.X];
+    match (i) {
+        0 => return vals[0].m();
+        1 => return vals[1].m();
+        2 => return E.B.m();
+        3 => return vals[3].m();
+    }
+    return -1;
+}

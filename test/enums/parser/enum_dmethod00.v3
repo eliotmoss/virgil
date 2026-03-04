@@ -1,0 +1,4 @@
+//@parse
+// Dotted def method on enum type
+enum E { A, B }
+def E.m() -> int { return 42; }

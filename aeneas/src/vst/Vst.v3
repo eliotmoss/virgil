@@ -242,6 +242,7 @@ class VstEnumCase extends VstMember {
 	def tag: int;
 	def args: VstList<Expr>;
 	var enumTag: int = -1;		// DFS-assigned global tag; -1 until assigned
+	var members: List<VstMember>;	// per-case method overrides
 	new(tag, name: Token, args) super(false, name) { }
 	def getType() -> Type {
 		return receiver.getDeclaredType();
@@ -408,6 +409,7 @@ class VstMethod extends VstMember {
 	var typeEnv: TypeEnv;
 	var root: VstMethod;
 	var importName: Token;
+	var enumCaseIrs: Array<IrMethod>;	// per-case override IrMethods, indexed by enumTag
 
 	new(isPrivate: bool, name: Token, typeParams, func) super(isPrivate, name) { }
 
