@@ -236,3 +236,5 @@ var o = p.origin;   // "Brazil": own field
 For subtype enum cases, the `name` field includes the subtype path.
 For example, `Color.Pastel.PINK.name` returns `"Pastel.PINK"`.
 The `shortName` field gives only the case name without the subtype prefix: `Color.Pastel.PINK.shortName` returns `"PINK"`.
+
+Enums can also have [methods](EnumMethods.md), including per-case overrides with virtual dispatch.

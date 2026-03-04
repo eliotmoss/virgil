@@ -58,9 +58,13 @@ A `VariantDecl` whose `DottedId` has the form `D.T` (one or more dots) declares 
 
 ```
 
-EnumDecl    ::= DottedId EnumParams? '{' EnumCase* '}'
-EnumCase    ::= id ['(' Expr,* ')'] ','?             // named case
-              | '_' ','?                              // default case: optional, must be last, at most one
+EnumDecl    ::= DottedId EnumParams? '{' EnumCase* (';' EnumMethod*)? '}'
+EnumCase    ::= id ['(' Expr,* ')'] EnumCaseBody? ','?   // named case
+              | '_' EnumCaseBody? ','?                    // default case: optional, must be last, at most one
+EnumCaseBody ::= '{' EnumCaseMethod* '}'
+EnumCaseMethod ::= ['private'] 'def' DefDef
+
+EnumMethod  ::= ['private'] 'def' DefDef                // shared by all cases; may be overridden per-case
 
 EnumParams  ::= '(' 'super' ')'                      // inherit parent's params
               | '(' 'super' ',' ParamDecl,+ ')'       // inherit parent's params + add new fields
@@ -96,6 +100,28 @@ In all forms, each case must provide argument values for all effective parameter
 In multi-level hierarchies, `super` refers to the immediate parent's effective parameters, which includes the root's parameters and all intermediate ancestors' extra parameters. For example, given `enum E(x: int)` and `enum E.S(super, y: int)`, a grandchild `enum E.S.T(super, z: int)` has effective parameters `(x, y, z)` and each case must provide all three values.
 
 Subtypes may **not** declare params if the parent has no effective params. Using `super` when the parent has no effective params is an error.
+
+### Enum methods
+
+An `EnumMethod` declared after the `;` separator is shared by all cases. It may be overridden per-case by placing a `def` with the same name and signature inside an `EnumCaseBody`.
+
+- An override must have the same parameter types and return type as the root method.
+- Dispatch on a variable of enum type is virtual: the override for the specific case is called at runtime.
+- Static dispatch on a known case (e.g. `E.A.m()`) calls the override directly if one exists.
+
+Methods may also be declared using dotted-def syntax outside the enum body:
+
+```
+enum E { A, B }
+def E.m() -> int { return 42; }
+```
+
+### Enum method inheritance
+
+- Methods declared on a parent enum are inherited by all subtype enums (transitively).
+- A subtype enum may override an inherited method by declaring a method with the same name and signature after its own `;` separator.
+- Individual cases of a subtype may further override methods via `EnumCaseBody`.
+- All virtual dispatch goes through the root enum's dispatch table, regardless of where the override is declared.
 
 ### Enum match pattern semantics
 
