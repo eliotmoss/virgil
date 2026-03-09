@@ -2077,6 +2077,7 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 					pat.vdecl.isReadOnly = true;
 					pat.vdecl.vtype = subtypeType;
 					pat.vdecl.ssa = VstSsaVar.new();
+					pat.subtypeType = subtypeType;
 					return;
 				}
 			}
@@ -3178,6 +3179,7 @@ class MatchStmtVerifier(etype: Type, tc: TypeChecker) {
 				if (ct.classDecl.qualifiers != null) {
 					// Subtype variant (e.g. x: B where type A.B). Generate a range
 					// test via VARIANT_QUERY; coverage is satisfied by the _ default arm.
+					pat.subtypeType = ct;
 					return;
 				}
 				// Named case: variantTag equals the local cases[] index after DFS
