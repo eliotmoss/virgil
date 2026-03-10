@@ -1,8 +1,0 @@
-//@seman
-// Dotted def method on enum type-checks correctly
-enum E { A, B }
-def E.m() -> int { return 42; }
-def main() {
-    var x: int = E.A.m();
-    var y: int = E.B.m();
-}

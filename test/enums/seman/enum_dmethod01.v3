@@ -1,4 +1,0 @@
-//@seman = DottedDefError
-// Duplicate method name via dotted def
-enum E { A, B; def m() -> int { return 0; } }
-def E.m() -> int { return 1; }

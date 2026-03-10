@@ -16,20 +16,6 @@ enum Planet(mass: double, radius: double) {
 var g = Planet.EARTH.surfaceGravity();
 ```
 
-Methods can also be declared externally using dotted-def syntax:
-
-```
-enum Direction { NORTH, SOUTH, EAST, WEST }
-def Direction.opposite() -> Direction {
-    match (this) {
-        NORTH => return Direction.SOUTH;
-        SOUTH => return Direction.NORTH;
-        EAST  => return Direction.WEST;
-        WEST  => return Direction.EAST;
-    }
-}
-```
-
 ## Per-case method overrides
 
 Individual cases can override an enum method by providing their own definition inside `{ }` braces.
