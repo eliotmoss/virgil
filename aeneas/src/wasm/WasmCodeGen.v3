@@ -417,13 +417,22 @@ class WasmCodeGen extends SsaMachGen {
 				emit3(WasmExtOp.REF_TEST.extopcode, dfn(i), use(i.input0()), useInt(int.!(wht.index - 1)));
 			}
 			TypeSubsume => {  // WasmGc
-				// An explicit cast is required to get the type right for subsequent uses
+				var fromType = i.op.typeArgs[0];
 				var toType = i.op.typeArgs[1];
-				var wht = wasmGc.gcTypeTable.addHeapType(toType);
-				if (CLOptions.PRINT_WASM_GC.get()) {
-					printDetail().put3("code gen TypeSubsume: toType %q  wht %q  type code %d", toType.render, wht.render, wht.index - 1).outln();
+				if (toType == Oop.TYPE && PrimType.?(fromType)) {
+					// Box int to i31ref (enum tag → Oop)
+					emit2(WasmExtOp.REF_I31.extopcode, dfn(i), use(i.input0()));
+				} else if (fromType == Oop.TYPE && PrimType.?(toType)) {
+					// Unbox i31ref to int (Oop → enum tag)
+					emit2(WasmExtOp.I31_GET_S.extopcode, dfn(i), use(i.input0()));
+				} else {
+					// An explicit cast is required to get the type right for subsequent uses
+					var wht = wasmGc.gcTypeTable.addHeapType(toType);
+					if (CLOptions.PRINT_WASM_GC.get()) {
+						printDetail().put3("code gen TypeSubsume: toType %q  wht %q  type code %d", toType.render, wht.render, wht.index - 1).outln();
+					}
+					emit3(WasmExtOp.REF_CAST_NULL.extopcode, dfn(i), use(i.input0()), useInt(int.!(wht.index - 1)));
 				}
-				emit3(WasmExtOp.REF_CAST_NULL.extopcode, dfn(i), use(i.input0()), useInt(int.!(wht.index - 1)));
 			}
 			CallVariantSelector(selector) => { // WasmGc
 				var op = i.op;
@@ -1668,7 +1677,13 @@ class WasmCodeGen extends SsaMachGen {
 		// WasmGc indirect adapters are also used for methods with receivers,
 		// which must load and cast the first argument.
 		// ============ indirect adapter code ========================
-		if (GC) {
+		if (EnumType.?(m.receiver) && GC) {
+			// wasm-gc enum: unbox eqref receiver → i31ref → i32 tag
+			b(WasmOp.GET_LOCAL.opcode); w.put_sleb32(0);
+			w.put_b16be(WasmExtOp.REF_CAST.extopcode);
+			w.put_sleb32(int.!(WasmTypeConCode.I31REF.val));
+			w.put_b16be(WasmExtOp.I31_GET_S.extopcode);
+		} else if (GC) {
 			var rcvr = m.receiver;
 			if (rcvr != Void.TYPE && !V3.isComponent(rcvr)) {
 				// get the receiver and cast it
@@ -1701,9 +1716,16 @@ class WasmCodeGen extends SsaMachGen {
 		// arguments to the target function
 		// ============ dispatch adapter code ========================
 		b(WasmOp.GET_LOCAL.opcode); w.put_sleb32(0);
-		w.put_b16be(WasmExtOp.REF_CAST_NULL.extopcode);
-		var wht = wasmGc.gcTypeTable.addHeapType(m.receiver);
-		w.put_sleb32(int.!(wht.index - 1));
+		if (EnumType.?(m.receiver)) {
+			// wasm-gc enum: unbox eqref → i31ref → i32 tag
+			w.put_b16be(WasmExtOp.REF_CAST.extopcode);
+			w.put_sleb32(int.!(WasmTypeConCode.I31REF.val));
+			w.put_b16be(WasmExtOp.I31_GET_S.extopcode);
+		} else {
+			w.put_b16be(WasmExtOp.REF_CAST_NULL.extopcode);
+			var wht = wasmGc.gcTypeTable.addHeapType(m.receiver);
+			w.put_sleb32(int.!(wht.index - 1));
+		}
 		for (i = 1; i < m.ssa.params.length; i++) {
 			b(WasmOp.GET_LOCAL.opcode); w.put_sleb32(i);
 		}

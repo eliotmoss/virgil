@@ -685,17 +685,27 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 				fillEnumMtable(l.head, methodName, impl, rootType, table, record);
 			}
 		}
-		// Fill any remaining tags in our range with our impl. Use the impl's actual
-		// declaring receiver in the IrSpec so the FuncVal's closure mangling and
-		// invokestatic target match the subtype where the override lives.
+		// Fill any remaining tags in our range with our impl. Resolve the old IrMethod
+		// to its normalized counterpart (rm.norm) — that's the IrMethod that's added to
+		// the new IrModule, gets machIndex / code-address fixed during emit, and matches
+		// what call sites see. Storing the pre-norm IrMethod would leave machIndex == -1
+		// and produce out-of-bounds wasm function references / unfixed native addresses.
 		for (t = decl.tagLo; t <= decl.tagHi; t++) {
 			if (table[t] == null) {
-				table[t] = impl;
-				var implReceiver = impl.receiver;
-				var spec = IrSpec.new(implReceiver, [implReceiver], impl);
+				var implNorm = normEnumImpl(impl);
+				table[t] = implNorm;
+				var implReceiver = implNorm.receiver;
+				var spec = IrSpec.new(implReceiver, [implReceiver], implNorm);
 				record.values[t] = FuncVal.new(spec);
 			}
 		}
+	}
+	// Resolve an enum-method old IrMethod to its normalized IrMethod via RA's makeMethod
+	// (which de-duplicates against an existing RaMethod if one was already created).
+	def normEnumImpl(old: IrMethod) -> IrMethod {
+		var ta: Array<Type> = [old.receiver];
+		var rm = ra.makeMethod(ta, old, null);
+		return rm.norm;
 	}
 	def resolveMethodImpl(rc: RaClass, rm: RaMethod) -> RaMethod {
 		var sm: RaMethod;
