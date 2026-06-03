@@ -1,0 +1,10 @@
+//@execute 0=10; 1=20
+// Open-enum subtype downcast: E -> E.More via E.More.!(...). Tag check passes
+// when the receiver's tag is in [tagLo, tagHi].
+enum E { A, _ }
+enum E.More { C, D }
+def main(arg: int) -> int {
+	var x: E = if(arg == 0, E.More.C, E.More.D);
+	var y: E.More = E.More.!(x);
+	return if(y == E.More.C, 10, 20);
+}

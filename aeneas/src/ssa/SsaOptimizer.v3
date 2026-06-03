@@ -751,6 +751,24 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 					ENUM_TO_SET => {
 						return addEnumToSet(EnumSetType.!(tt), x);
 					}
+					ENUM_CAST => {
+						// Open-enum subtype downcast: check the receiver's tag falls in the
+						// target subtype's [tagLo, tagHi] range. Throws TypeCheck if not; the
+						// value passes through unchanged (enum values are just tag ints).
+						var tt2 = EnumType.!(tt);
+						var tagType = EnumType.!(ft).enumDecl.tagType;
+						var lo = tt2.enumDecl.tagLo, hi = tt2.enumDecl.tagHi;
+						var cmp: SsaInstr;
+						if (lo == hi) {
+							cmp = addNot(addBinop(V3Op.newIntEq(tagType), x, graph.intConst(lo)));
+						} else {
+							var chkLo = addBinop(tagType.opLtEq(), graph.intConst(lo), x);
+							var chkHi = addBinop(tagType.opLtEq(), x, graph.intConst(hi));
+							cmp = addNot(addBinop(V3Op.opBoolAnd, chkLo, chkHi));
+						}
+						addConditionalThrow(i.source, V3Exception.TypeCheck, cmp);
+						return x;
+					}
 					_ => {
 						if (x.facts.V_NON_ZERO) {
 							i.facts |= Fact.O_NO_NULL_CHECK | Fact.V_NON_ZERO;

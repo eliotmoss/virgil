@@ -1,0 +1,10 @@
+//@execute 0=!TypeCheckException
+// Open-enum downcast that fails: tag of the receiver falls outside the target
+// subtype's range. Should throw a TypeCheckException.
+enum E { A, _ }
+enum E.More { C, D }
+def main(arg: int) -> int {
+	var x: E = E.A;
+	var y: E.More = E.More.!(x);
+	return 1;
+}
