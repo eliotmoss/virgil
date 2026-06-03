@@ -1314,6 +1314,12 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 		if (ft == tt) return null;
 		if (FuncType.?(ft) || FuncType.?(tt)) return V3Op.newTypeSubsume(ft, tt);
 		if (TupleType.?(ft) || TupleType.?(tt)) return V3Op.newTypeSubsume(ft, tt);
+		// Enum closure dispatch: when a CallFunction/CallClosure fold rewrites to a
+		// direct CallMethod, the closure ABI's Oop receiver slot may need to be
+		// unboxed back to the enum's tag type (or vice versa). JvmGen/WasmCodeGen
+		// already handle TypeSubsume<Oop, prim> / <prim, Oop>.
+		if (ft == Oop.TYPE && PrimType.?(tt)) return V3Op.newTypeSubsume(ft, tt);
+		if (tt == Oop.TYPE && PrimType.?(ft)) return V3Op.newTypeSubsume(ft, tt);
 		return null;
 	}
 	def copyInputs(i: SsaInstr, prepend: SsaInstr, start: int) -> Array<SsaInstr> {
