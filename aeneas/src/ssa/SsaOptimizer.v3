@@ -1199,6 +1199,15 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 	}
 	def tryEval(apply: SsaApplyOp) -> SsaInstr {
 		for (i in apply.inputs) if (!SsaConst.?(i.dest)) return null; // only evaluate if all inputs are constants
+		// Don't fold TypeSubsume<P, Oop> for primitive P: the interpreter treats this as
+		// a no-op (SUBSUME), but the resulting SsaConst(Oop, intVal) would skip the
+		// backend's boxing materialization (Integer.valueOf on JVM, ref.i31 on wasm-gc),
+		// producing genLoadConst failures.
+		if (apply.op.opcode == Opcode.TypeSubsume
+		    && apply.op.typeArgs[1] == Oop.TYPE
+		    && PrimType.?(apply.op.typeArgs[0])) {
+			return null;
+		}
 		if (foldingArgs == null) foldingArgs = FoldingArguments.new(context.prog);
 		if (apply.inputs.length != apply.op.sig.paramTypes.length) {
 			// XXX: attempt normalization first.

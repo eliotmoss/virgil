@@ -632,7 +632,11 @@ component TypeSystem {
 					if(y.typeCon.kind == Kind.FUNCREF) return TypeCast.TRUE; // TODO: funcref cast
 				}
 			}
+			if (PrimType.?(toType)) return TypeCast.TRUE; // Oop → primitive: backends unbox
 		}
+		// Primitive → Oop: backends materialize boxing (Integer.valueOf / ref.i31);
+		// interpreter passes the value through unchanged.
+		if (PrimType.?(fromType) && toType == Oop.TYPE) return TypeCast.TRUE;
 		return TypeCast.THROW;
 	}
 	def maybeQuery(t1: Type, t2: Type, eq: TypeQuery, neq: TypeQuery) -> TypeQuery {
