@@ -47,6 +47,14 @@ component Eval {
 				}
 				return throw;
 			}
+			ENUM_CAST => {
+				// Open-enum subtype: check val.tag falls in [target.tagLo, target.tagHi].
+				if (val == null) return ok;
+				var tt2 = EnumType.!(tt);
+				var tag = if(Box<int>.?(val), Box<int>.!(val).val, 0);
+				if (tt2.enumDecl.tagLo <= tag && tag <= tt2.enumDecl.tagHi) return ok;
+				return throw;
+			}
 			INT_VIEW_I => {
 				return (true, doIntView(IntType.!(ft), IntType.!(tt), val));
 			}
@@ -129,6 +137,13 @@ component Eval {
 				if (val == null) return false;
 				if (tt.open()) return false;
 				return Record.?(val) && TypeSystem.isSubtype(Record.!(val).rtype, tt);
+			}
+			ENUM_QUERY => {
+				// Open-enum subtype: check val.tag falls in [target.tagLo, target.tagHi].
+				if (val == null) return false;
+				var tt2 = EnumType.!(tt);
+				var tag = if(Box<int>.?(val), Box<int>.!(val).val, 0);
+				return tt2.enumDecl.tagLo <= tag && tag <= tt2.enumDecl.tagHi;
 			}
 			FLOAT_QUERY_I => {
 				var t = fround_i(V3.isDouble(tt), IntType.!(ft), val);

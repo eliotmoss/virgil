@@ -333,7 +333,18 @@ class MethodEnv {
 			return expr.bind(null, VarBinding.Const(Int.box(count), countType), countType);
 		}
 		var member = resolveEnumMember(expr, enumType, name);
-		if (member == null) return VarBinding.None;
+		if (member == null) {
+			// Open enum: name may refer to a direct subtype of this enum (E.More).
+			var subtypes = enumType.enumDecl.subtypes;
+			if (subtypes != null) {
+				var subDecl = subtypes[name];
+				if (subDecl != null) {
+					var subType = EnumType.!(subDecl.typeCon.create0());
+					return expr.bind(null, VarBinding.Type(subType), subType);
+				}
+			}
+			return VarBinding.None;
+		}
 		match (member.member) {
 			x: VstField => {
 				var memberType = Function.newType(enumType, member.memberType);

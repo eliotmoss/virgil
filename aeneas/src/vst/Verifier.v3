@@ -393,6 +393,15 @@ class Verifier(compiler: Compiler, prog: Program) {
 		// The next element must be parent.name() and then end.
 		return cq != null && Strings.equal(cq.head.image, parent.name()) && cq.tail == null;
 	}
+	def isDirectEnumSubtypeOf(child: VstEnum, parent: VstEnum) -> bool {
+		var cq = child.qualifiers;
+		if (cq == null) return false;
+		for (l = parent.qualifiers; l != null; l = l.tail) {
+			if (cq == null || !Strings.equal(cq.head.image, l.head.image)) return false;
+			cq = cq.tail;
+		}
+		return cq != null && Strings.equal(cq.head.image, parent.name()) && cq.tail == null;
+	}
 	// Check that a variant has at most one "case _" and that it comes last.
 	def checkVariantDefaultCase(decl: VstClass, cv: VstCompoundVerifier) {
 		if (decl.cases == null) return;
@@ -1324,7 +1333,6 @@ class VstCompoundVerifier {
 						}
 					}
 				} else if (EnumType.?(leftType)) {
-					// Enum.set resolution.
 					var enumType = EnumType.!(leftType);
 					if (Strings.equal(x.name.image, "set")) {
 						if (x.nested != null) {
@@ -1332,6 +1340,24 @@ class VstCompoundVerifier {
 								x.name.image, 0, x.nested.length());
 						}
 						return getEnumSetType(x, enumType);
+					}
+					// Open enum: name may refer to a direct subtype of this enum (E.More).
+					var subtypes = enumType.enumDecl.subtypes;
+					if (subtypes != null) {
+						var subDecl = subtypes[x.name.image];
+						if (subDecl != null) {
+							return x.binding = subDecl.typeCon.create0();
+						}
+					}
+					// Fall back: subtypes map may not be populated yet (early type resolution
+					// during verifyComponent runs before verifyEnumQualifiers). Use the parse-time
+					// qualifiers field to verify the direct subtype relationship.
+					var subTc = verifier.prog.typeEnv.lookup(x.name.image);
+					if (subTc != null && subTc.kind == Kind.ENUM) {
+						var subDecl = EnumType.!(subTc.create0()).enumDecl;
+						if (verifier.isDirectEnumSubtypeOf(subDecl, enumType.enumDecl)) {
+							return x.binding = subDecl.typeCon.create0();
+						}
 					}
 				}
 				if (x.left != null) {
@@ -1969,11 +1995,25 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 		if (ve.expr != null) {
 			return errAtExpr(ve).MatchError(Strings.format1("match on type %q requires unqualified case", vt.render));
 		}
-		var vc = vt.lookupCase(ve.ident.name.image);
-		if (vc == null) {
-			return errAtExpr(ve).MatchError(Strings.format2("unresolved case %q.%s", vt.render, ve.ident.name.image));
+		var name = ve.ident.name.image;
+		var vc = vt.lookupCase(name);
+		if (vc != null) return mv.addEnumPattern(pat, vc);
+		// Open enum: unqualified name may refer to a direct subtype of this enum.
+		// Range-cover the subtype's [tagLo, tagHi].
+		var subDecl = lookupEnumSubtypeByName(vt.enumDecl, name);
+		if (subDecl != null) return mv.addEnumSubtypePattern(pat, subDecl);
+		errAtExpr(ve).MatchError(Strings.format2("unresolved case %q.%s", vt.render, name));
+	}
+	def lookupEnumSubtypeByName(decl: VstEnum, name: string) -> VstEnum {
+		// Walk own subtypes, then up the ancestor chain via parentEnum so a subtype-typed
+		// match can reference its siblings/ancestors via unqualified names.
+		for (e = decl; e != null; e = e.parentEnum) {
+			if (e.subtypes != null) {
+				var sub = e.subtypes[name];
+				if (sub != null) return sub;
+			}
 		}
-		mv.addEnumPattern(pat, vc);
+		return null;
 	}
 	def visitEmpty(stmt: EmptyStmt, outer: Type) -> Type {
 		return Void.TYPE;
@@ -2990,7 +3030,11 @@ class MatchStmtVerifier(etype: Type, tc: TypeChecker) {
 			covered = Array.new(variantType.classDecl.cases.length);
 		} else if (EnumType.?(etype)) {
 			enumType = EnumType.!(etype);
-			covered = Array.new(enumType.enumDecl.cases.length);
+			// For open enums, size `covered` to the root's global DFS tag count so subtype-case
+			// tags (which are global DFS tags) index validly.
+			var root = enumType.enumDecl.rootEnum;
+			var size = if(root != null && root.tagHi >= 0, root.tagHi + 1, enumType.enumDecl.cases.length);
+			covered = Array.new(size);
 		}
 	}
 	def addValue(pat: MatchPattern, val: Val) {
@@ -3015,6 +3059,18 @@ class MatchStmtVerifier(etype: Type, tc: TypeChecker) {
 		}
 		covered[vc.tag] = pat;
 		pat.val = Int.box(vc.tag);
+	}
+	// Cover the global DFS tag range [tagLo, tagHi] for a subtype enum arm. The IR side
+	// emits a range test against the receiver's tag; coverage is satisfied by all tags in range.
+	def addEnumSubtypePattern(pat: MatchPattern, sub: VstEnum) {
+		for (t = sub.tagLo; t <= sub.tagHi; t++) {
+			if (covered[t] != null) {
+				MatchError(pat.expr.range(), "duplicate case", covered[t].expr.range());
+				return;
+			}
+			covered[t] = pat;
+		}
+		pat.val = Int.box(sub.tagLo);
 	}
 	def addTypePattern(pat: MatchPattern, t: Type) {
 		var cast = TypeSystem.newTypeCast(etype, t);
@@ -3050,9 +3106,16 @@ class MatchStmtVerifier(etype: Type, tc: TypeChecker) {
 	}
 	def end(stmt: MatchStmt) {
 		if (covered == null) return;
+		// For enums, only the tag range of the *static* match type matters; tags outside
+		// that range are unreachable. Compute [lo, hi] accordingly.
+		var lo = 0, hi = covered.length;
+		if (enumType != null && enumType.enumDecl.tagLo >= 0) {
+			lo = enumType.enumDecl.tagLo;
+			hi = enumType.enumDecl.tagHi + 1;
+		}
 		if (default != null) {
-			for (p in covered) {
-				if (p == null) return;
+			for (i = lo; i < hi; i++) {
+				if (covered[i] == null) return;
 			}
 			tc.errAtRange(default.range()).set("UnreachableCode", "unreachable default case");
 			return;
@@ -3069,17 +3132,35 @@ class MatchStmtVerifier(etype: Type, tc: TypeChecker) {
 			}
 		}
 		var buf: StringBuilder;
-		for (i < covered.length) {
+		for (i = lo; i < hi; i++) {
 			if (covered[i] == null) {
 				var t = if(variantType == null, enumType, variantType);
 				if (buf == null) buf = StringBuilder.new().put1("match on type %q does not cover:", t.render);
-				var name = if(variantType == null,
-					enumType.enumDecl.cases[i].name(),
-					variantType.classDecl.cases[i].name());
+				var name: string;
+				if (variantType != null) {
+					name = variantType.classDecl.cases[i].name();
+				} else {
+					name = findEnumCaseNameByTag(enumType.enumDecl, i);
+				}
 				buf.puts(" ").puts(name);
 			}
 		}
 		if (buf != null) MatchError(stmt.range(), buf.toString(), null);
+	}
+	def findEnumCaseNameByTag(decl: VstEnum, tag: int) -> string {
+		// Search the static enum's tree (rooted at decl) for a case with the given DFS tag.
+		for (c in decl.cases) {
+			if (c.tag == tag) return c.name();
+		}
+		if (decl.subtypeOrder != null) {
+			for (l = decl.subtypeOrder; l != null; l = l.tail) {
+				var sub = l.head;
+				if (sub.tagLo <= tag && tag <= sub.tagHi) {
+					return findEnumCaseNameByTag(sub, tag);
+				}
+			}
+		}
+		return Strings.format1("tag %d", tag);
 	}
 	def isVariant() -> bool {
 		return variantType != null;
@@ -3089,7 +3170,13 @@ class MatchStmtVerifier(etype: Type, tc: TypeChecker) {
 	}
 	def allCovered() -> bool {
 		if (covered == null) return false;
-		for (p in covered) if (p == null) return false;
+		// For subtype-typed enum matches, only the [tagLo, tagHi] range needs to be covered.
+		var lo = 0, hi = covered.length;
+		if (enumType != null && enumType.enumDecl.tagLo >= 0) {
+			lo = enumType.enumDecl.tagLo;
+			hi = enumType.enumDecl.tagHi + 1;
+		}
+		for (i = lo; i < hi; i++) if (covered[i] == null) return false;
 		return true;
 	}
 	def MatchError(range: FileRange, msg: string, prev: FilePoint) {
