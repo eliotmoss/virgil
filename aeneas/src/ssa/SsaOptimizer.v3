@@ -1467,15 +1467,51 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 		}
 		// Try resolving on the (potentially more precise) static type of the receiver.
 		var xt = x.getType();
-		// Skip enum-subtype devirtualization: the subtype's IrClass indices don't share the
-		// root's slot layout, so resolveMethodImpl would index out of bounds. Open-enum
-		// virtual calls are resolved at runtime via the mtable instead.
-		if (V3.isEnum(xt) && xt != m.receiver) return null;
+		// Enum subtype receiver: walk the VstEnum hierarchy. The root's IrClass doesn't
+		// share slot layout with subtype IrClasses, so resolveMethodImpl can't help here;
+		// we instead bind to the deepest enum in the receiver's tag range whose impl is
+		// uniform across that range.
+		if (V3.isEnum(xt) && xt != m.receiver) return devirtualizeEnumSubtype(m, xt);
 		if (TypeSystem.isSubtype(xt, m.receiver)) {
 			var xm = context.prog.ir.resolveMethodImpl(xt, m);
 			if (!xm.member.flags.M_OVERRIDDEN) return xm;
 		}
 		return null;
+	}
+	def devirtualizeEnumSubtype(m: IrSpec, xt: Type) -> IrSpec {
+		if (!IrMethod.?(m.member)) return null;
+		var subtypeDecl = EnumType.!(xt).enumDecl;
+		var name = IrMethod.!(m.member).source.name();
+		// If any strict descendant overrides this method, dispatch is non-uniform across
+		// xt's tag range; the runtime mtable must resolve it.
+		if (hasEnumDescendantOverride(subtypeDecl, name)) return null;
+		// Walk up (inclusive) to the nearest ancestor with an override; that's the uniform impl.
+		var cur = subtypeDecl;
+		while (cur != null) {
+			var impl = enumOverrideImpl(cur, name);
+			if (impl != null) {
+				var implReceiver = cur.getDeclaredType();
+				return IrSpec.new(implReceiver, Arrays.replace(m.typeArgs, 0, implReceiver), impl);
+			}
+			cur = cur.parentEnum;
+		}
+		return null;
+	}
+	def enumOverrideImpl(decl: VstEnum, name: string) -> IrMethod {
+		if (decl.memberMap == null) return null;
+		var member = decl.memberMap[name];
+		if (!VstMethod.?(member)) return null;
+		var vm = VstMethod.!(member);
+		var ic = context.prog.ir.makeIrClass(decl.getDeclaredType());
+		if (ic == null || vm.index < 0 || vm.index >= ic.methods.length) return null;
+		return ic.methods[vm.index];
+	}
+	def hasEnumDescendantOverride(decl: VstEnum, name: string) -> bool {
+		for (l = decl.subtypeOrder; l != null; l = l.tail) {
+			if (enumOverrideImpl(l.head, name) != null) return true;
+			if (hasEnumDescendantOverride(l.head, name)) return true;
+		}
+		return false;
 	}
 
 	def asRecord(i: SsaInstr) -> Record {

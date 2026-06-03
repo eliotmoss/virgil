@@ -1,0 +1,16 @@
+//@execute 0=1; 1=2
+// Devirt must NOT fire here: E.More.Deep (descendant of E.More) overrides m, so
+// across E.More's tag range the impl is non-uniform. The CallVariantVirtual on
+// the E.More-typed receiver must stay virtual so the runtime mtable can choose
+// between E.m (for E.More.B) and E.More.Deep.m (for E.More.Deep.C).
+enum E { A, _; def m() -> int { return 1; } }
+enum E.More { B, _; }
+enum E.More.Deep { C; def m() -> int { return 2; } }
+
+def callOnMore(x: E.More) -> int { return x.m(); }
+
+def main(i: int) -> int {
+    var b: E.More = E.More.B;
+    var c: E.More = E.More.Deep.C;
+    return if(i == 0, callOnMore(b), callOnMore(c));
+}

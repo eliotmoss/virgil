@@ -162,7 +162,19 @@ class MethodEnv {
 		return VarBinding.None;
 	}
 	def resolveEnumMember(expr: VarExpr, enumType: EnumType, name: string) -> ResolvedMember {
-		return resolveCompoundMember(expr, enumType, enumType, enumType.enumDecl, name);
+		// First try this enum's own members; fall back to ancestor enums (parentEnum chain)
+		// so subtypes inherit root- or ancestor-declared methods. Carry the declaring
+		// enum's type as containerType so the resolved member's `receiver` points at the
+		// declaring enum — matching the class-side convention in resolveClassMember.
+		var decl = enumType.enumDecl;
+		var containerType: Type = enumType;
+		while (decl != null) {
+			var result = resolveCompoundMember(expr, enumType, containerType, decl, name);
+			if (result != null) return result;
+			decl = decl.parentEnum;
+			if (decl != null) containerType = decl.getDeclaredType();
+		}
+		return null;
 	}
 	def resolveClassMember(expr: VarExpr, classType: ClassType, name: string) -> ResolvedMember {
 		var exprType = classType;
@@ -383,7 +395,7 @@ class MethodEnv {
 				return newApplyCompBinding(expr, expr.expr, enumType.getNameOperator());
 			}
 			x: VstMethod => {
-				return expr.bind(receiver, VarBinding.ObjectMethod(enumType, x, member.typeArgs), member.memberType);
+				return expr.bind(receiver, VarBinding.ObjectMethod(member.receiver, x, member.typeArgs), member.memberType);
 			}
 		}
 		return VarBinding.None;
