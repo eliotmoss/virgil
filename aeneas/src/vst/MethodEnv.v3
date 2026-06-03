@@ -384,7 +384,9 @@ class MethodEnv {
 		var receiver = objExpr(useThis, name, expr);
 		match (member.member) {
 			x: VstField => {
-				return newApplyCompBinding(expr, expr.expr, enumType.enumGetParamOperator(x));
+				// Pass the synthesized `receiver` (handles useThis), not `expr.expr` (which
+				// is null for implicit-this reads inside an enum method body).
+				return newApplyCompBinding(expr, receiver, enumType.enumGetParamOperator(x));
 			}
 			x: VstVariantTagMember => {
 				var tagType = enumType.enumDecl.tagType;

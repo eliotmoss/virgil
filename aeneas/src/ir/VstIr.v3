@@ -72,10 +72,66 @@ class IrBuilder(ctype: Type, parent: IrClass) {
 				x: VstMethod => addVstMethod(x);
 			}
 		}
+		// Strategy B: per-case method overrides on enum cases. Build an IrMethod for each
+		// override and record it in the root method's enumCaseImpls array (indexed by the
+		// case's DFS tag). The runtime dispatch tag fillEnumMtable picks this up before
+		// falling back to the normal parent walk.
+		match (decl) {
+			edecl: VstEnum => addVstEnumCaseMethods(edecl);
+		}
 		var ic = build();
 		ic.boxing = boxing;
 		ic.packed = packed;
 		return ic;
+	}
+	def addVstEnumCaseMethods(decl: VstEnum) {
+		for (i < decl.cases.length) {
+			var vc = decl.cases[i];
+			if (vc.members == null) continue;
+			for (l = vc.members; l != null; l = l.tail) {
+				match (l.head) {
+					m: VstMethod => addEnumCaseOverride(decl, vc, m);
+					_ => ;
+				}
+			}
+		}
+	}
+	def addEnumCaseOverride(decl: VstEnum, vc: VstEnumCase, m: VstMethod) {
+		var rootMethod = m.root;
+		if (rootMethod == null || rootMethod == m) return; // verifier already errored
+		var ir = newIrMethod(m);
+		addRepHintFacts(m, ir);
+		ir.flags |= IrFlag.M_OVERRIDE;
+		addIrMethod(ir);
+		m.index = ir.index;
+		// Allocate the root method's caseImpls array on first override. Size matches the
+		// root enum's DFS tag range so subtype-case overrides also slot in correctly.
+		var root = rootMethod.root;
+		var rootEnum = VstEnum.!(root.receiver);
+		var size = rootEnum.tagHi + 1;
+		if (root.enumCaseImpls == null) root.enumCaseImpls = Array<IrMethod>.new(size);
+		if (root.enumCaseMethods == null) root.enumCaseMethods = Array<VstMethod>.new(size);
+		var tag = vc.tag;
+		if (tag >= 0 && tag < size) {
+			root.enumCaseImpls[tag] = ir;
+			root.enumCaseMethods[tag] = m;
+		}
+		// Mark the root's IrMethod as overridden so bestCallVirtual routes to virtual
+		// dispatch and the mtable builder consults caseImpls. If the root method lives on
+		// the same enum we're currently building, look it up in our local `methods` vector
+		// — calling module.makeIrClass(currentCtype) would recurse into ourselves.
+		if (rootEnum.getDeclaredType() == ctype) {
+			if (root.index >= 0 && root.index < methods.length) {
+				var rootIr = methods[root.index];
+				if (rootIr != null) rootIr.flags |= IrFlag.M_OVERRIDDEN;
+			}
+		} else if (module != null) {
+			var rootIc = module.makeIrClass(rootEnum.getDeclaredType());
+			if (rootIc != null && root.index >= 0 && root.index < rootIc.methods.length) {
+				var rootIr = rootIc.methods[root.index];
+				if (rootIr != null) rootIr.flags |= IrFlag.M_OVERRIDDEN;
+			}
+		}
 	}
 	def addVstField(f: VstField, isVariant: bool, unboxed: bool) {
 		var ir = IrField.new(ctype, f.getType());

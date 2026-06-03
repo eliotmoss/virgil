@@ -1191,12 +1191,14 @@ def lookupEnumVirtual(args: Arguments, recv: Val, spec: IrSpec) -> IrSpec {
 	var name = IrMethod.!(spec.member).source.name();
 	var impl: IrMember = spec.member;
 	var implReceiver = spec.receiver;
+	var rootMethod: VstMethod;
 	var cur = rootEnum;
 	while (cur != null) {
 		if (cur.memberMap != null) {
 			var member = cur.memberMap[name];
 			if (VstMethod.?(member)) {
 				var vm = VstMethod.!(member);
+				if (rootMethod == null) rootMethod = vm.root;
 				var ic = args.getProgram().ir.makeIrClass(cur.getDeclaredType());
 				if (ic != null && vm.index >= 0 && vm.index < ic.methods.length) {
 					var subImpl = ic.methods[vm.index];
@@ -1217,6 +1219,15 @@ def lookupEnumVirtual(args: Arguments, recv: Val, spec: IrSpec) -> IrSpec {
 			}
 		}
 		cur = next;
+	}
+	// Strategy B: per-case override at this tag wins over subtype/root fallbacks.
+	if (rootMethod != null && rootMethod.enumCaseImpls != null
+	    && tag >= 0 && tag < rootMethod.enumCaseImpls.length) {
+		var perCase = rootMethod.enumCaseImpls[tag];
+		if (perCase != null) {
+			impl = perCase;
+			implReceiver = perCase.receiver;
+		}
 	}
 	return IrSpec.new(implReceiver, [implReceiver], impl);
 }

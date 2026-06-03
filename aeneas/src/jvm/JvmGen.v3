@@ -163,11 +163,26 @@ class JvmProgram(compiler: Compiler, prog: Program) {
 	def mangleConvertName(prefix: string, exactType: Type, implicitType: Type) -> string {
 		return mangleTypeName(prefix, Function.newType(exactType, implicitType));
 	}
+	// Mangle an enum-method name for the V3E_<enum> class. Per-case and subtype overrides
+	// share the same source name as the root method, so JVM (which keys static methods by
+	// (name, descriptor)) would reject duplicates. Append the IrMethod's uid to make each
+	// override's static method distinct.
+	def mangleEnumMethod(m: IrMethod) -> string {
+		var base = V3.mangleIrMember(m);
+		if (m.flags.M_OVERRIDE || m.flags.M_OVERRIDDEN) {
+			return Strings.format2("%s_%d", base, m.uid);
+		}
+		return base;
+	}
 	def mangleClosureName(memberRef: IrSpec) -> string {
 		var buffer = StringBuilder.new();
 		buffer.puts(mangleTypeName("V3D_", memberRef.receiver));
 		buffer.puts("$D");
-		var methName = V3.mangleIrMember(memberRef.member);
+		// Use mangleEnumMethod for enum receivers so per-case / subtype overrides get
+		// distinct closure classes (V3.mangleIrMember collapses them to the source name).
+		var methName = if(V3.isEnum(memberRef.receiver) && IrMethod.?(memberRef.member),
+			mangleEnumMethod(IrMethod.!(memberRef.member)),
+			V3.mangleIrMember(memberRef.member));
 		buffer.puts(methName);
 		return buffer.toString();
 	}
@@ -499,7 +514,7 @@ class JvmV3EnumGen extends JvmClassGen {
 	}
 	def buildMethod(m: IrMethod) {
 		if (m == null || m.flags.M_ABSTRACT) return;
-		var name = V3.mangleIrMember(m);
+		var name = builder.jprog.mangleEnumMethod(m);
 		// Enum methods are static; the receiver tag is passed as the first parameter.
 		var recvRep = builder.jprog.jrep.getRep(enumType);
 		var retType = builder.jprog.jrep.getRep(Function.getReturnType(m.getMethodType()));
@@ -676,7 +691,10 @@ class JvmV3ClosureGen extends JvmClassGen {
 		var recvRep = builder.jprog.jrep.getRep(memberRef.receiver);
 		var retType = builder.jprog.jrep.getRep(Function.getReturnType(methType));
 		var jsig = builder.jprog.makeJvmSig(recvRep, methType, retType);
-		invoke_code.invokestatic(jclass.name, V3.mangleIrMember(memberRef.member), jsig);
+		var mname = if(IrMethod.?(memberRef.member),
+			builder.jprog.mangleEnumMethod(IrMethod.!(memberRef.member)),
+			V3.mangleIrMember(memberRef.member));
+		invoke_code.invokestatic(jclass.name, mname, jsig);
 		invoke_code.ret(jvmKind(Function.getReturnType(funcType)));
 		invoke_code.attach(invoke_meth);
 	}

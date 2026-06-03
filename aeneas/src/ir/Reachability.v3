@@ -559,6 +559,17 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 						getMethod(null, impl);
 					}
 				}
+				// Strategy B: per-case overrides on this enum's cases (root or subtype).
+				if (vm.root.enumCaseImpls != null) {
+					var impls = vm.root.enumCaseImpls;
+					for (t < impls.length) {
+						var ci = impls[t];
+						if (ci == null) continue;
+						var ta: Array<Type> = [ci.receiver];
+						var perCase = makeMethod(ta, ci, null);
+						getMethod(null, perCase);
+					}
+				}
 			}
 		}
 		if (decl.subtypeOrder != null) {

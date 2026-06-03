@@ -571,6 +571,15 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 			rm.norm.flags |= IrFlag.M_ABSTRACT | IrFlag.M_UNREACHABLE;
 			if (!rm.isVirtual()) return; // not live, not virtual
 		}
+		// Carry M_OVERRIDE / M_OVERRIDDEN forward from the pre-norm IrMethod for enum
+		// methods, so JVM mangleEnumMethod can disambiguate Strategy B per-case / subtype
+		// overrides that share the root's source name. Class/variant methods get their
+		// flags set further down the function (when the parent method is found), so a
+		// blanket transfer would mis-flag siblings as overrides.
+		if (V3.isEnum(rm.receiver)) {
+			if (m.flags.M_OVERRIDE) rm.norm.flags |= IrFlag.M_OVERRIDE;
+			if (m.flags.M_OVERRIDDEN) rm.norm.flags |= IrFlag.M_OVERRIDDEN;
+		}
 		if (m.flags.M_NEW) {
 			// constructors always end up at slot 0
 			rm.norm.flags |= IrFlag.M_NEW;
@@ -668,10 +677,12 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 	def fillEnumMtable(decl: VstEnum, methodName: string, parentImpl: IrMethod,
 			   rootType: Type, table: Array<IrMethod>, record: Record) {
 		var impl = parentImpl;
+		var rootMethod: VstMethod;
 		if (decl.memberMap != null) {
 			var member = decl.memberMap[methodName];
 			if (VstMethod.?(member)) {
 				var vm = VstMethod.!(member);
+				rootMethod = vm.root;
 				var ic = ra.oldIr.makeIrClass(decl.getDeclaredType());
 				if (ic != null && vm.index >= 0 && vm.index < ic.methods.length) {
 					var subImpl = ic.methods[vm.index];
@@ -685,14 +696,18 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 				fillEnumMtable(l.head, methodName, impl, rootType, table, record);
 			}
 		}
-		// Fill any remaining tags in our range with our impl. Resolve the old IrMethod
-		// to its normalized counterpart (rm.norm) — that's the IrMethod that's added to
-		// the new IrModule, gets machIndex / code-address fixed during emit, and matches
-		// what call sites see. Storing the pre-norm IrMethod would leave machIndex == -1
-		// and produce out-of-bounds wasm function references / unfixed native addresses.
+		// Fill any remaining tags in our range. Strategy B per-case overrides on the root
+		// method's enumCaseImpls take priority at their specific tag; everything else gets
+		// the (sub)tree default impl. Resolve to the normalized IrMethod via normEnumImpl
+		// — the pre-norm IrMethod from oldIr never receives machIndex / code-address.
+		var caseImpls: Array<IrMethod>;
+		if (rootMethod != null) caseImpls = rootMethod.enumCaseImpls;
 		for (t = decl.tagLo; t <= decl.tagHi; t++) {
 			if (table[t] == null) {
-				var implNorm = normEnumImpl(impl);
+				var perCase: IrMethod;
+				if (caseImpls != null && t < caseImpls.length) perCase = caseImpls[t];
+				var slotImpl = if(perCase != null, perCase, impl);
+				var implNorm = normEnumImpl(slotImpl);
 				table[t] = implNorm;
 				var implReceiver = implNorm.receiver;
 				var spec = IrSpec.new(implReceiver, [implReceiver], implNorm);

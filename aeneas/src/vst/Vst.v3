@@ -420,6 +420,14 @@ class VstMethod extends VstMember {
 	var typeEnv: TypeEnv;
 	var root: VstMethod;
 	var importName: Token;
+	// Strategy B: per-case override IrMethods, indexed by the case's DFS tag. Lives on
+	// the root enum method only; null entries mean "use the default impl picked by
+	// fillEnumMtable's normal walk". Populated by VstIr.buildClass for enum methods.
+	var enumCaseImpls: Array<IrMethod>;
+	// Per-case override VstMethod for each tag, parallel to enumCaseImpls. Used by
+	// the verifier to find which root method a case-level override is overriding and
+	// by MethodEnv for static-dispatch lookups (E.A.m()).
+	var enumCaseMethods: Array<VstMethod>;
 
 	new(isPrivate: bool, name: Token, typeParams, func) super(isPrivate, name) { }
 
