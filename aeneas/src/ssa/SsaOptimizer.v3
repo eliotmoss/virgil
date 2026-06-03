@@ -969,8 +969,10 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 				if (i.op.isPolymorphic()) return i;
 				var xval = unop(i);
 				if (xconst) {
-					// VariantGetMethod[m](#K) => (m, #K)
-					var obj = Record.!(xval);
+					// VariantGetMethod[m](#K) => (m, #K). Enum receivers are int tags; the
+					// fold below stores the raw tag — normValIntoArray boxes it for
+					// ref-receiver targets so tag 0 stays distinct from a null Oop.
+					var obj: Val = if(V3.isEnum(meth.receiver), xval, Record.!(xval));
 					var val = if(!meth.member.flags.M_UNREACHABLE, Closure.new(obj, meth));
 					return graph.valConst(meth.getBoundType(), val);
 				}
@@ -982,7 +984,7 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 				if (dv != null) {
 					var xval = unop(i);
 					if (xconst && !i.op.isPolymorphic()) {  // VariantGetVirtual[m](K) => (m, K)
-						var obj = Record.!(xval);
+						var obj: Val = if(V3.isEnum(dv.receiver), xval, Record.!(xval));
 						var val = if(!dv.member.flags.M_UNREACHABLE, Closure.new(obj, dv));
 						return graph.valConst(dv.getBoundType(), val);
 					}

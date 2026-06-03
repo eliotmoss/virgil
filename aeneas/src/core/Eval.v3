@@ -825,15 +825,22 @@ def evalOp(op: Operator, args: Arguments) -> Result {
 			return if(object != null, object.values[field.index]);
 		}
 		VariantGetMethod(method) => {
-			var object = args.r(0);
 			var spec = args.getClosedIrSpec(method);
 			if (spec == null) return args.notFoldable(null);
-			return Closure.new(object, spec);
+			// Enum closure capture: receiver is an int tag, not a Record. Box the raw
+			// value into the closure unchanged; CallClosure (enum spec) reads it back.
+			if (V3.isEnum(spec.receiver)) return Closure.new(args.vals[0], spec);
+			return Closure.new(args.r(0), spec);
 		}
 		VariantGetVirtual(method) => {
-			var object = getRecordReceiver(args);
 			var spec = args.getClosedIrSpec(method);
 			if (spec == null) return args.notFoldable(null);
+			if (V3.isEnum(spec.receiver)) {
+				var recv = args.vals[0];
+				spec = lookupEnumVirtual(args, recv, spec);
+				return Closure.new(recv, spec);
+			}
+			var object = getRecordReceiver(args);
 			spec = lookupVariantVirtual(args, object, spec);
 			return Closure.new(object, spec);
 		}

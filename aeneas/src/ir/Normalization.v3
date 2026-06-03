@@ -40,6 +40,12 @@ def defaultGetBitWidth(t: Type) -> byte {
 		_ => return 64;
 	}
 }
+// Targets where the closure receiver slot must hold a reference value (JVM,
+// wasm-gc). When true, an enum closure's int-tag receiver must be wrapped in an
+// OopInt marker so backends keep tag 0 distinct from a literal null Oop.
+def needsBoxedEnumClosureReceiver(cfg: NormalizerConfig) -> bool {
+	return !cfg.NonRefClosureReceiver || cfg.ExplicitRefTypeCast;
+}
 
 // Normalizes a program based on the results of reachability analysis.
 def TRANSFERRABLE_FLAGS = (IrFlag.M_ABSTRACT | IrFlag.M_INLINE | IrFlag.M_NEVER_INLINE | IrFlag.M_ENUM_INIT | IrFlag.M_NEW | IrFlag.M_EMPTY | IrFlag.M_EQUALS | IrFlag.M_WRAPPER | IrFlag.M_MAPPER | IrFlag.M_UNMAPPER);
@@ -855,7 +861,14 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 							 tn.render, x.memberRef.asMethod().render, V3.render(fval)).outln();
 				}
 				array[index] = fval;
-				normValIntoArray(x.val, norm(x.memberRef.receiver), array, index + 1);
+				// Enum closure capture: receiver is the int tag. On ref-receiver targets
+				// (JVM, wasm-gc) wrap in OopInt so the heap emit keeps tag 0 distinct from
+				// a literal null Oop. Native/wasm linear pass the tag through unchanged.
+				var rval = x.val;
+				if (V3.isEnum(x.memberRef.receiver) && needsBoxedEnumClosureReceiver(config)) {
+					rval = OopInt.new(V3.unboxI32(rval));
+				}
+				normValIntoArray(rval, norm(x.memberRef.receiver), array, index + 1);
 			}
 			x: BoxVal => {
 				// tuple: recursively normalize all of the sub

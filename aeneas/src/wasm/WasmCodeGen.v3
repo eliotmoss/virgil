@@ -1376,6 +1376,11 @@ class WasmCodeGen extends SsaMachGen {
 								assemble(WasmOp.GET_GLOBAL.opcode, [Operand.Immediate(Int.box(abs))]);
 							}
 						}
+						x: OopInt => {
+							// Enum tag boxed for closure receiver: emit i32.const v; ref.i31
+							assemble(WasmOp.I32_CONST.opcode, [Operand.Immediate(Int.box(x.v))]);
+							assemble(WasmExtOp.REF_I31.extopcode, []);
+						}
 						_ => context.fail1("pushValue() no global for value of type %q", t.render);
 					}
 				}
@@ -1847,6 +1852,11 @@ class WasmCodeGen extends SsaMachGen {
 							} else {
 								emit1(WasmOp.GET_GLOBAL.opcode, useInt(abs));
 							}
+						}
+						x: OopInt => {
+							// Enum tag boxed for closure receiver: emit i32.const v; ref.i31
+							emit1(WasmOp.I32_CONST.opcode, useImm(Int.box(x.v)));
+							emitN(WasmExtOp.REF_I31.extopcode);
 						}
 						_ => context.fail1("genLoadConst() no global for value of type %q", t.render);
 					}
