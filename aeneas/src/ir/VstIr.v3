@@ -72,10 +72,9 @@ class IrBuilder(ctype: Type, parent: IrClass) {
 				x: VstMethod => addVstMethod(x);
 			}
 		}
-		// Strategy B: per-case method overrides on enum cases. Build an IrMethod for each
-		// override and record it in the root method's enumCaseImpls array (indexed by the
-		// case's DFS tag). The runtime dispatch tag fillEnumMtable picks this up before
-		// falling back to the normal parent walk.
+		// Per-case method overrides on enum cases. Build an IrMethod for each override and
+		// record it in the root method's enumCaseImpls array (indexed by the case's DFS
+		// tag). fillEnumMtable picks this up before falling back to the normal parent walk.
 		match (decl) {
 			edecl: VstEnum => addVstEnumCaseMethods(edecl);
 		}

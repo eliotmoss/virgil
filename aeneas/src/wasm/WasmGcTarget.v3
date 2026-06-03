@@ -351,9 +351,9 @@ class WasmGcTarget extends Target {
 			wasm.indirectAdapterFor[meth] = findex;
 			wasm.indirectAdapterIndexFor[meth] = i + 1;  // + 1 to skip the null entry
 			wasm.indirectAdapterVector.put(meth);
-			// On master the IrMethod's sig.paramTypes does not include the receiver tag
-			// (the tag is on receiver, not in sig). So the adapter sig is just meth.sig
-			// — no stripping needed (unlike 3b where sig includes the tag).
+			// IrMethod.sig.paramTypes does not include the receiver tag for enum methods
+			// (the tag is on receiver, not in sig). So the adapter sig is just meth.sig —
+			// no stripping needed.
 			var sigIdx = wasm.addSig(Oop.TYPE, meth.sig);
 			var fi = FunctionInfo.new(FunctionInfoKind.Indirect, Oop.TYPE, meth.sig, sigIdx, meth, findex);
 			table0Infos.put(fi);
@@ -413,7 +413,7 @@ class WasmGcTarget extends Target {
 				wasm.requestIndirectAdapter(m);
 				var findex = functionInfos.length;
 				wasm.indirectAdapterFor[m] = findex;
-				// Same as above: master's IrMethod sig has no receiver tag — don't strip.
+				// Same as above: enum IrMethod sig has no receiver tag — don't strip.
 				var sigIdx = wasm.addSig(Oop.TYPE, m.sig);
 				var fi = FunctionInfo.new(FunctionInfoKind.Indirect, Oop.TYPE, m.sig, sigIdx, m, findex);
 				table0Infos.put(fi);

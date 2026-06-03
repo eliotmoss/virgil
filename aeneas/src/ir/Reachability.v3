@@ -559,7 +559,7 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 						getMethod(null, impl);
 					}
 				}
-				// Strategy B: per-case overrides on this enum's cases (root or subtype).
+				// Per-case overrides on this enum's cases (root or subtype).
 				if (vm.root.enumCaseImpls != null) {
 					var impls = vm.root.enumCaseImpls;
 					for (t < impls.length) {

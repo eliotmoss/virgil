@@ -35,9 +35,9 @@ class Verifier(compiler: Compiler, prog: Program) {
 		forAll(vst.enums, verifyEnumQualifiers);
 		forAll(vst.enums, assignEnumTagsIfRoot);
 		forAll(vst.enums, verifyEnum);
-		// Strategy B: validate per-case method overrides (Pass D'). Must run after verifyEnum
-		// so each enum's memberMap is built; binds each per-case method to a root method by
-		// name. Body type-checking happens later in typeCheckEnumCaseMethods.
+		// Validate per-case method overrides. Must run after verifyEnum so each enum's
+		// memberMap is built; binds each per-case method to a root method by name.
+		// Body type-checking happens later in typeCheckEnumCaseMethods.
 		forAll(vst.enums, verifyEnumCaseMethods);
 		forAll(vst.layouts, verifyLayout);
 		forAll(vst.exports, verifyExport);
@@ -45,7 +45,7 @@ class Verifier(compiler: Compiler, prog: Program) {
 		forAll<VstComponent>(vst.components, typeCheckVstCompound);
 		forAll<VstClass>(vst.classes, typeCheckVstCompound);
 		forAll<VstEnum>(vst.enums, typeCheckVstCompound);
-		// Strategy B: type-check per-case method bodies.
+		// Type-check per-case method bodies.
 		forAll(vst.enums, typeCheckEnumCaseMethods);
 		forAll<VstLayout>(vst.layouts, typeCheckVstCompound);
 
@@ -679,9 +679,9 @@ class Verifier(compiler: Compiler, prog: Program) {
 		var cv = decl.verifier;
 		cv.verify();
 	}
-	// Strategy B: validate per-case method overrides. For each case in the enum (and `_`),
-	// for each VstMethod in case.members, find the matching root method by name and wire
-	// the case method as an override (decl.root = rootMethod, decl.receiver = rootEnum,
+	// Validate per-case method overrides. For each case in the enum (and `_`), for each
+	// VstMethod in case.members, find the matching root method by name and wire the case
+	// method as an override (decl.root = rootMethod, decl.receiver = rootEnum,
 	// decl.index = rootMethod.index). Defers signature check to methodOverrideChecks.
 	def verifyEnumCaseMethods(decl: VstEnum) {
 		var cv = decl.verifier;
@@ -1337,8 +1337,8 @@ class VstCompoundVerifier {
 	def checkMethodOverride(decl: VstMethod) {
 		var binding = lookupSuperMember(decl.name()); // re-resolve member after return type inference
 		if (binding == null && VstEnum.?(compound)) {
-			// Subtype enum override of an ancestor enum's method, OR Strategy B per-case
-			// override (bindEnumCaseMethod set decl.root to the root method directly).
+			// Subtype enum override of an ancestor enum's method, OR per-case override
+			// (bindEnumCaseMethod set decl.root to the root method directly).
 			var ancestor: VstMethod = if(decl.root != null && decl.root != decl, decl.root,
 				lookupAncestorEnumMethod(VstEnum.!(compound), decl.name()));
 			if (ancestor == null) return;

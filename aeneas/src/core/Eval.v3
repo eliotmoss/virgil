@@ -1220,7 +1220,7 @@ def lookupEnumVirtual(args: Arguments, recv: Val, spec: IrSpec) -> IrSpec {
 		}
 		cur = next;
 	}
-	// Strategy B: per-case override at this tag wins over subtype/root fallbacks.
+	// Per-case override at this tag wins over subtype/root fallbacks.
 	if (rootMethod != null && rootMethod.enumCaseImpls != null
 	    && tag >= 0 && tag < rootMethod.enumCaseImpls.length) {
 		var perCase = rootMethod.enumCaseImpls[tag];

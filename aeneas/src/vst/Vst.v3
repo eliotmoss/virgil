@@ -254,7 +254,7 @@ class VstEnumCase extends VstMember {
 	def args: VstList<Expr>;
 	var parentEnum: VstEnum;			// enum that lexically owns this case
 	var tagHi: int = -1;				// equals tag for leaves; for `case _` covers its parent's subtype range
-	var members: List<VstMember>;			// per-case method overrides (Strategy B), parsed from `case A { def m() ... }`
+	var members: List<VstMember>;			// per-case method overrides, parsed from `case A { def m() ... }`
 	new(tag, name: Token, args) super(false, name) { }
 	def getType() -> Type {
 		return receiver.getDeclaredType();
@@ -420,8 +420,8 @@ class VstMethod extends VstMember {
 	var typeEnv: TypeEnv;
 	var root: VstMethod;
 	var importName: Token;
-	// Strategy B: per-case override IrMethods, indexed by the case's DFS tag. Lives on
-	// the root enum method only; null entries mean "use the default impl picked by
+	// Per-case override IrMethods, indexed by the case's DFS tag. Lives on the root
+	// enum method only; null entries mean "use the default impl picked by
 	// fillEnumMtable's normal walk". Populated by VstIr.buildClass for enum methods.
 	var enumCaseImpls: Array<IrMethod>;
 	// Per-case override VstMethod for each tag, parallel to enumCaseImpls. Used by

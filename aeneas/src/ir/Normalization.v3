@@ -572,10 +572,10 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 			if (!rm.isVirtual()) return; // not live, not virtual
 		}
 		// Carry M_OVERRIDE / M_OVERRIDDEN forward from the pre-norm IrMethod for enum
-		// methods, so JVM mangleEnumMethod can disambiguate Strategy B per-case / subtype
-		// overrides that share the root's source name. Class/variant methods get their
-		// flags set further down the function (when the parent method is found), so a
-		// blanket transfer would mis-flag siblings as overrides.
+		// methods, so JVM mangleEnumMethod can disambiguate per-case / subtype overrides
+		// that share the root's source name. Class/variant methods set these flags
+		// further down the function (when the parent method is found), so a blanket
+		// transfer would mis-flag siblings as overrides.
 		if (V3.isEnum(rm.receiver)) {
 			if (m.flags.M_OVERRIDE) rm.norm.flags |= IrFlag.M_OVERRIDE;
 			if (m.flags.M_OVERRIDDEN) rm.norm.flags |= IrFlag.M_OVERRIDDEN;
@@ -696,10 +696,10 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 				fillEnumMtable(l.head, methodName, impl, rootType, table, record);
 			}
 		}
-		// Fill any remaining tags in our range. Strategy B per-case overrides on the root
-		// method's enumCaseImpls take priority at their specific tag; everything else gets
-		// the (sub)tree default impl. Resolve to the normalized IrMethod via normEnumImpl
-		// — the pre-norm IrMethod from oldIr never receives machIndex / code-address.
+		// Fill any remaining tags in our range. Per-case overrides on the root method's
+		// enumCaseImpls take priority at their specific tag; everything else gets the
+		// (sub)tree default impl. Resolve to the normalized IrMethod via normEnumImpl —
+		// the pre-norm IrMethod from oldIr never receives machIndex / code-address.
 		var caseImpls: Array<IrMethod>;
 		if (rootMethod != null) caseImpls = rootMethod.enumCaseImpls;
 		for (t = decl.tagLo; t <= decl.tagHi; t++) {

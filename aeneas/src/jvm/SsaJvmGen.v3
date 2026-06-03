@@ -687,7 +687,7 @@ class SsaJvmGen(jprog: JvmProgram, context: SsaContext, jsig: JvmSig, code: JvmC
 		} else if (V3.isEnum(methodRef.receiver)) {
 			// Enum methods are static methods on the synthetic V3E_<name> class; the receiver
 			// tag is passed as the first parameter. mangleEnumMethod disambiguates the name
-			// for Strategy B per-case / subtype overrides that share the root's source name.
+			// for per-case / subtype overrides that share the root's source name.
 			var recvRep = jprog.jrep.getRep(methodRef.receiver);
 			var retType = jprog.jrep.getRep(Function.getReturnType(methodRef.getMethodType()));
 			var nsig = jprog.makeJvmSig(recvRep, methodRef.getMethodType(), retType);
