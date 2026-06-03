@@ -321,6 +321,10 @@ class WasmCodeGen extends SsaMachGen {
 				if (V3.isComponent(m.receiver)) {
 					start = 2;
 					dfnAll(i);
+				} else if (V3.isEnum(m.receiver)) {
+					// Enum methods take the integer tag as their first parameter; no ref.cast.
+					start = 1;
+					dfnAll(i);
 				} else {
 					var rt = i.input1().getType();
 					if (rt == m.receiver) {
@@ -358,6 +362,10 @@ class WasmCodeGen extends SsaMachGen {
 				var start: int;  // defines how many args to skip (always target, sometimes rcvr)
 				if (V3.isComponent(m.receiver)) {
 					start = 2;
+					dfnAll(i);
+				} else if (V3.isEnum(m.receiver)) {
+					// Enum methods take the integer tag as their first parameter; no ref.cast.
+					start = 1;
 					dfnAll(i);
 				} else {
 					var rt = i.input1().getType();

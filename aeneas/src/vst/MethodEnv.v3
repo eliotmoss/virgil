@@ -369,6 +369,7 @@ class MethodEnv {
 		var name = expr.ident.name;
 		var member = resolveEnumMember(expr, enumType, name.image);
 		if (member == null) return VarBinding.None;
+		var receiver = objExpr(useThis, name, expr);
 		match (member.member) {
 			x: VstField => {
 				return newApplyCompBinding(expr, expr.expr, enumType.enumGetParamOperator(x));
@@ -380,6 +381,9 @@ class MethodEnv {
 			}
 			x: VstVariantNameMember => {
 				return newApplyCompBinding(expr, expr.expr, enumType.getNameOperator());
+			}
+			x: VstMethod => {
+				return expr.bind(receiver, VarBinding.ObjectMethod(enumType, x, member.typeArgs), member.memberType);
 			}
 		}
 		return VarBinding.None;

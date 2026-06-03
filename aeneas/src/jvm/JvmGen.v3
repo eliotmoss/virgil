@@ -107,6 +107,11 @@ class JvmProgram(compiler: Compiler, prog: Program) {
 			}
 			CLASS => jvmType(utype);
 			COMPONENT => jvmType(utype);
+			ENUM => {
+				// Open-enum methods live on a synthetic JvmClass (V3E_<name>) so call sites
+				// can use invokestatic with the enum tag passed as the first parameter.
+				if (ic.methods.length > 0) jrep.makeJvmEnumMethodHost(utype, ic);
+			}
 			_ => ;
 		}
 	}
@@ -479,6 +484,27 @@ class JvmV3ComponentGen extends JvmClassGen {
 		}
 		main_code.retvoid();
 		main_code.attach(main_meth);
+	}
+}
+// Generates a Jvm class to host static methods for an enum type. The enum's tag is passed
+// as the first (or sole) argument to each static method, since enums have no instance state
+// on the JVM (their JVM representation is `int`).
+class JvmV3EnumGen extends JvmClassGen {
+	def enumType: Type;
+	def ic: IrClass;
+	new(builder: JvmClassfileBuilder, enumType, ic) super(builder) { }
+	def build() {
+		for (m in ic.methods) buildMethod(m);
+		addEmptyInit();
+	}
+	def buildMethod(m: IrMethod) {
+		if (m == null || m.flags.M_ABSTRACT) return;
+		var name = V3.mangleIrMember(m);
+		// Enum methods are static; the receiver tag is passed as the first parameter.
+		var recvRep = builder.jprog.jrep.getRep(enumType);
+		var retType = builder.jprog.jrep.getRep(Function.getReturnType(m.getMethodType()));
+		var jsig = builder.jprog.makeJvmSig(recvRep, m.getMethodType(), retType);
+		genCode(builder, m, name, jsig, true);
 	}
 }
 // Generates a Jvm class representing a tuple

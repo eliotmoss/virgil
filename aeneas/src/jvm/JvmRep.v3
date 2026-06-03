@@ -64,6 +64,12 @@ class JvmTypeReps(jprog: JvmProgram) {
 		jprog.classQueue.put(JvmV3ClassGen.new(JvmClassfileBuilder.new(jprog, jclass), utype, ic));
 		return jclass;
 	}
+	def makeJvmEnumMethodHost(utype: Type, ic: IrClass) {
+		var className = jprog.mangleTypeName("V3E_", utype);
+		var jclass = JvmClass.new(className, JvmTypes.jlo);
+		jvmClasses[utype] = jclass;
+		jprog.classQueue.put(JvmV3EnumGen.new(JvmClassfileBuilder.new(jprog, jclass), utype, ic));
+	}
 	private def makeJvmComponent(utype: Type) -> JvmType {
 		var ic = jprog.prog.ir.getIrClass(utype);
 		var className = jprog.mangleTypeName("V3K_", utype);

@@ -679,6 +679,13 @@ class SsaJvmGen(jprog: JvmProgram, context: SsaContext, jsig: JvmSig, code: JvmC
 		if (methodRef.isNew()) {
 			var nsig = jprog.makeJvmSig(jclass, methodRef.getMethodType(), jclass);
 			code.invokestatic(jclass.name, "$init", nsig);
+		} else if (V3.isEnum(methodRef.receiver)) {
+			// Enum methods are static methods on the synthetic V3E_<name> class; the receiver
+			// tag is passed as the first parameter.
+			var recvRep = jprog.jrep.getRep(methodRef.receiver);
+			var retType = jprog.jrep.getRep(Function.getReturnType(methodRef.getMethodType()));
+			var nsig = jprog.makeJvmSig(recvRep, methodRef.getMethodType(), retType);
+			code.invokestatic(jclass.name, V3.mangleIrMember(methodRef.member), nsig);
 		} else if (V3.isComponent(methodRef.receiver)) {
 			var nsig = jprog.jvmSig(methodRef.getMethodType());
 			code.invokestatic(jclass.name, V3.mangleIrMember(methodRef.member), nsig);

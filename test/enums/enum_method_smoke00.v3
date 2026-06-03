@@ -1,0 +1,9 @@
+//@execute 0=42
+enum Color { RED, GREEN, BLUE; def brightness() -> int {
+	match (this) {
+		RED => return 12;
+		GREEN => return 14;
+		BLUE => return 16;
+	}
+} }
+def main(arg: int) -> int { return Color.RED.brightness() + Color.GREEN.brightness() + Color.BLUE.brightness(); }

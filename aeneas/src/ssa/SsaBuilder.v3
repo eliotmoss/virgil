@@ -647,6 +647,10 @@ class SsaBuilder {
 					return opTypeCast(ft, tt, x);
 				}
 			}
+			ENUM => {
+				// Open-enum subtype upcast (E.More -> E): no representation change.
+				if (V3.isEnum(ft)) return x;
+			}
 			TUPLE => {
 				return opTypeCast(ft, tt, x);
 			}
