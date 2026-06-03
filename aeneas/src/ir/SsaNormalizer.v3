@@ -1096,6 +1096,28 @@ class SsaRaNormalizer extends SsaRebuilder {
 				}
 				// break
 			}
+			ENUM_QUERY => {
+				// Open-enum subtype query: emit `tagLo <= e && e <= tagHi` (or exact equality
+				// for a leaf). Enum values are integers, so no tag extraction is needed.
+				if (V3.isEnum(atn.oldType) && V3.isEnum(rtn.oldType)) {
+					var actualTag = ai_old[offset];
+					var tagType = EnumType.!(atn.oldType).enumDecl.tagType;
+					var rDecl = EnumType.!(rtn.oldType).enumDecl;
+					var check: SsaInstr;
+					if (rDecl.tagLo == rDecl.tagHi) {
+						var expected = newGraph.intConst(rDecl.tagLo);
+						check = curBlock.pure(V3Op.newIntEq(tagType), [actualTag, expected]);
+					} else {
+						var lo = newGraph.intConst(rDecl.tagLo);
+						var hi = newGraph.intConst(rDecl.tagHi);
+						var chkLo = curBlock.pure(tagType.opLtEq(), [lo, actualTag]);
+						var chkHi = curBlock.pure(tagType.opLtEq(), [actualTag, hi]);
+						check = curBlock.opBoolAnd0(chkLo, chkHi);
+					}
+					return opAnd(left, check);
+				}
+				// break
+			}
 			_ => ; // break
 		}
 		if (atn.size > 1) {

@@ -755,6 +755,8 @@ class MatchPattern(expr: Expr, params: VstList<VarDecl>) {
 	var variantCase: VstCaseMember;  // if this is a match on a variant case
 	var vdecl: VarDecl; // if this is a type case (including variant subtype patterns)
 	var val: Val;
+	var tagLo: int = -1;	// for open-enum subtype-arm range patterns; -1 means not a range
+	var tagHi: int = -1;	// inclusive high end of the range
 	def decl() -> VstClass { return variantCase.decl; }
 }
 // continue;

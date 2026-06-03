@@ -607,32 +607,23 @@ class Verifier(compiler: Compiler, prog: Program) {
 		decl.parentEnum = parentEnum;
 		decl.rootEnum = rootEnum;
 	}
-	// Pass B: assigns global DFS tags to every case in a root enum's subtree, sets tagLo/tagHi
-	// on every node, widens the root's tagType to fit, and propagates it. Skips subtype enums.
-	// Note: EnumType.width and EnumSetType.repType are immutable; widening those will be done in
-	// a later phase when consumers start to depend on hierarchy-wide widths.
+	// Pass B: assigns global DFS tags to every case in a root enum's subtree. Layout per node:
+	//   1. Named cases (excluding `_`) in declaration order.
+	//   2. Subtypes in declaration order.
+	//   3. The `_` case (if any) shares the tag of the first subtype slot (defaultLo) and its
+	//      tagHi extends through the entire subtree's tag range. A `_` case in a subtree without
+	//      any subtypes consumes one fresh tag.
+	// This puts the user-visible named-case tags first (so .tag values are stable across
+	// open-enum extension) and gives `_` a range that matches "any value of a subtype the
+	// match doesn't enumerate".
+	// Skips subtype enums; widens the root's tagType to fit and propagates it.
 	def assignEnumTagsIfRoot(decl: VstEnum) {
-		if (decl.qualifiers != null) return;	// skip subtypes
-		var nextTag = 0;
-		for (c in decl.cases) {
-			c.tag = nextTag;
-			c.tagHi = nextTag;
-			c.parentEnum = decl;
-			nextTag++;
-		}
-		if (decl.subtypeOrder != null) {
-			for (l = decl.subtypeOrder; l != null; l = l.tail) {
-				nextTag = assignEnumTagsDFS(l.head, nextTag);
-			}
-			if (decl.defaultCase != null) {
-				decl.defaultCase.tagHi = nextTag - 1;
-			}
-		}
+		if (decl.qualifiers != null) return;
+		var total = assignEnumTagsDFS(decl, 0);
 		decl.tagLo = 0;
-		decl.tagHi = nextTag - 1;
-		// Widen root's tagType to fit all DFS tags.
+		decl.tagHi = total - 1;
 		var width = 1, exp = 2;
-		while (exp < nextTag) { exp = exp << 1; width++; }
+		while (exp < total) { exp = exp << 1; width++; }
 		decl.tagType = Int.getType(false, width);
 		propagateEnumTagType(decl, decl.tagType);
 	}
@@ -640,18 +631,26 @@ class Verifier(compiler: Compiler, prog: Program) {
 		var nextTag = startTag;
 		decl.tagLo = nextTag;
 		for (c in decl.cases) {
+			if (Strings.equal(c.name(), "_")) continue;
 			c.tag = nextTag;
 			c.tagHi = nextTag;
 			c.parentEnum = decl;
 			nextTag++;
 		}
+		var defaultLo = nextTag;
 		if (decl.subtypeOrder != null) {
-			for (l = decl.subtypeOrder; l != null; l = l.tail) {
+			// subtypeOrder is stored in reverse declaration order; walk forward order.
+			for (l = Lists.reverse(decl.subtypeOrder); l != null; l = l.tail) {
 				nextTag = assignEnumTagsDFS(l.head, nextTag);
 			}
-			if (decl.defaultCase != null) {
-				decl.defaultCase.tagHi = nextTag - 1;
-			}
+		}
+		// Place `_` at defaultLo, extend its tagHi to cover the subtree.
+		if (decl.defaultCase != null) {
+			decl.defaultCase.tag = defaultLo;
+			decl.defaultCase.parentEnum = decl;
+			// `_` in a subtree with no subtypes still needs at least one fresh tag slot.
+			if (decl.hasDefault && nextTag <= defaultLo) nextTag = defaultLo + 1;
+			decl.defaultCase.tagHi = nextTag - 1;
 		}
 		decl.tagHi = nextTag - 1;
 		return nextTag;
@@ -3071,6 +3070,8 @@ class MatchStmtVerifier(etype: Type, tc: TypeChecker) {
 			covered[t] = pat;
 		}
 		pat.val = Int.box(sub.tagLo);
+		pat.tagLo = sub.tagLo;
+		pat.tagHi = sub.tagHi;
 	}
 	def addTypePattern(pat: MatchPattern, t: Type) {
 		var cast = TypeSystem.newTypeCast(etype, t);
@@ -3114,6 +3115,9 @@ class MatchStmtVerifier(etype: Type, tc: TypeChecker) {
 			hi = enumType.enumDecl.tagHi + 1;
 		}
 		if (default != null) {
+			// For open enums, the default arm is *always* reachable: future subtype additions
+			// could introduce cases the current match doesn't enumerate.
+			if (enumType != null && enumType.enumDecl.hasDefault) return;
 			for (i = lo; i < hi; i++) {
 				if (covered[i] == null) return;
 			}

@@ -578,6 +578,14 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 			// type case (first grammar rule "id: TypeRef"), generate "T.?(key)"
 			var query = V3Op.newTypeQuery(keyType, t);
 			return cur.addApply(null, query, [key]);
+		} else if (pat.tagHi > pat.tagLo) {
+			// open-enum subtype arm: emit `tagLo <= key && key <= tagHi`.
+			var lo = graph.valConst(keyType, Int.box(pat.tagLo));
+			var hi = graph.valConst(keyType, Int.box(pat.tagHi));
+			var itype = IntType.!(keyType);
+			var chkLo = cur.addApply(null, itype.opLtEq(), [lo, key]);
+			var chkHi = cur.addApply(null, itype.opLtEq(), [key, hi]);
+			return cur.addApply(null, V3Op.opBoolAnd, [chkLo, chkHi]);
 		} else {
 			// this is a value / tag case, generate "key == const"
 			var const = graph.valConst(keyType, pat.val);
@@ -598,6 +606,10 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 					var r = Eval.doQuery0(keyType, t, val);
 					if (r) return true;
 				}
+			} else if (pat.tagHi > pat.tagLo) {
+				// open-enum subtype range pattern
+				var tagVal = Int.unbox(val);
+				if (tagVal >= pat.tagLo && tagVal <= pat.tagHi) return true;
 			} else if (Values.equal(val, pat.val)) {
 				return true;
 			}
