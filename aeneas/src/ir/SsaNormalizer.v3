@@ -299,14 +299,40 @@ class SsaRaNormalizer extends SsaRebuilder {
 				var ai_new = normArgs(funcNorm, genRefs(i_old.inputs));
 				if (t.2) { // still a virtual dispatch
 					if (V3.isEnum(op.typeArgs[0])) {
-						// Open-enum virtual: receiver value IS the tag, no extraction needed.
+						// Open-enum virtual: receiver value IS the tag. Look up the function
+						// from the per-root mtable, then call it. Backends differ:
+						// - JVM / ref-typed-closure-receiver: box the tag to Oop so it can ride
+						//   in the closure receiver slot; user args are the remainder.
+						// - native: no Oop receiver; pass the tag as the first user argument
+						//   via CallFunctionDirect (which skips the Oop prepend).
 						var tag = ai_new[0];
 						var record = IrSelector.!(m.member).mtable.record;
 						var table = newGraph.valConst(record.rtype, record);
 						var tagType = EnumType.!(op.typeArgs[0]).enumDecl.tagType;
 						var func = curBlock.opArrayGetElem(record.rtype, tagType, Facts.O_SAFE_BOUNDS, table, tag);
-						ai_new = Arrays.concat([func, newGraph.nullReceiver()], ai_new);
-						normCall(i_old, funcNorm, V3Op.newCallFunction(funcNorm.sub[0]), ai_new);
+						if (!context.compiler.NormConfig.NonRefClosureReceiver
+						    || context.compiler.NormConfig.ExplicitRefTypeCast) {
+							// JVM / wasm-gc: box the tag to Oop for the closure receiver slot
+							var boxedTag = curBlock.opTypeSubsume(tagType, Oop.TYPE, tag);
+							var userArgs = Arrays.range(ai_new, 1, ai_new.length);
+							var userParamType: Type = Void.TYPE;
+							if (userArgs.length > 0) {
+								var pTypes = Array<Type>.new(userArgs.length);
+								for (j < userArgs.length) pTypes[j] = userArgs[j].getType();
+								userParamType = Tuple.fromTypeArray(pTypes);
+							}
+							var userFuncType = Function.newType(userParamType, funcNorm.sig().returnType());
+							ai_new = Arrays.concat([func, boxedTag], userArgs);
+							normCall(i_old, funcNorm, V3Op.newCallFunction(userFuncType), ai_new);
+						} else {
+							// native: tag stays as a scalar arg; no Oop receiver. The funcref
+							// type includes the enum receiver so the op signature is
+							// (enum-receiver, args...), matching the mtable record's element type.
+							var enumType = op.typeArgs[0];
+							var nativeFuncType = Function.prependParamType(enumType, funcNorm.sub[0]);
+							ai_new = Arrays.prepend(func, ai_new);
+							normCall(i_old, funcNorm, V3Op.newCallFunctionDirect(nativeFuncType), ai_new);
+						}
 					} else if (rc.isUnboxed()) {
 						// use the variant tag as an index into a table of functions
 						var tag = normVariantGetTag(rc.variantNorm, ai_new);

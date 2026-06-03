@@ -603,6 +603,7 @@ class JvmV3ClosureGen extends JvmClassGen {
 			buildAbstractClass(invoke_meth);
 		} else {
 			if (V3.isComponent(memberRef.receiver)) buildComponentClosure(invoke_meth);
+			else if (V3.isEnum(memberRef.receiver)) buildEnumClosure(invoke_meth);
 			else buildClassClosure(invoke_meth);
 		}
 	}
@@ -654,6 +655,28 @@ class JvmV3ClosureGen extends JvmClassGen {
 		var jclass = builder.jprog.jvmClass(memberRef.receiver);
 		invoke_code.locals(invoke_sig.localsSize(true));
 		invoke_code.invokestatic(jclass.name, V3.mangleIrMember(memberRef.member), jvmSig(methType));
+		invoke_code.ret(jvmKind(Function.getReturnType(funcType)));
+		invoke_code.attach(invoke_meth);
+	}
+	// Closure for an enum method (static method on V3E_<root>). The receiver tag rides in the
+	// Oop slot as a boxed Integer; unbox it, append the method's other params, and invokestatic
+	// the user method with the tag-prepended signature that JvmV3EnumGen emits.
+	def buildEnumClosure(invoke_meth: JvmMethod) {
+		addEmptyInit();
+		emitSingletonField();
+
+		var invoke_code = builder.newCodeBuilder();
+		invoke_code.locals(invoke_sig.localsSize(true));
+		// local 0 = this; local 1 = Oop (boxed tag); locals 2.. = user params
+		invoke_code.aload_1();
+		invoke_code.checkcast(JvmTypes.java_lang_Integer);
+		invoke_code.invokevirtual(JvmTypes.java_lang_Integer.name, "intValue", JvmTypes.SIG_VOID_INT);
+		builder.emitLoadArguments(invoke_code, methType, methType, 2);
+		var jclass = builder.jprog.jvmClass(memberRef.receiver);
+		var recvRep = builder.jprog.jrep.getRep(memberRef.receiver);
+		var retType = builder.jprog.jrep.getRep(Function.getReturnType(methType));
+		var jsig = builder.jprog.makeJvmSig(recvRep, methType, retType);
+		invoke_code.invokestatic(jclass.name, V3.mangleIrMember(memberRef.member), jsig);
 		invoke_code.ret(jvmKind(Function.getReturnType(funcType)));
 		invoke_code.attach(invoke_meth);
 	}

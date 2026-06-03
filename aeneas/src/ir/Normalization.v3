@@ -649,7 +649,18 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 		var table = Array<IrMethod>.new(size);
 		var mtable = IrMtable.new(rootImpl, 0, table);
 		rv.mtable = mtable;
-		var ft = Function.funcRefType(rootImpl.getMethodType());
+		// Pick the mtable element type to match the call-site dispatch convention used by
+		// SsaNormalizer.CallVariantVirtual for enums. On native (NonRefClosureReceiver=true
+		// and no explicit ref cast), the call uses CallFunctionDirect with the tag as a
+		// scalar argument, so the funcref signature must include the receiver. On JVM and
+		// wasm-gc, the call uses CallFunction (Oop receiver = boxed tag), so the funcref
+		// signature carries only the user params — Oop gets prepended at the op level.
+		var methType = rootImpl.getMethodType();
+		if (ra.compiler.NormConfig.NonRefClosureReceiver
+		    && !ra.compiler.NormConfig.ExplicitRefTypeCast) {
+			methType = Function.prependParamType(rootImpl.receiver, methType);
+		}
+		var ft = Function.funcRefType(methType);
 		mtable.record = ra.prog.newRecord(V3Array.newType(ft), size);
 		var methodName = rm.orig.source.name();
 		fillEnumMtable(rootDecl, methodName, rootImpl, rm.receiver, table, mtable.record);
@@ -674,11 +685,14 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 				fillEnumMtable(l.head, methodName, impl, rootType, table, record);
 			}
 		}
-		// Fill any remaining tags in our range with our impl.
+		// Fill any remaining tags in our range with our impl. Use the impl's actual
+		// declaring receiver in the IrSpec so the FuncVal's closure mangling and
+		// invokestatic target match the subtype where the override lives.
 		for (t = decl.tagLo; t <= decl.tagHi; t++) {
 			if (table[t] == null) {
 				table[t] = impl;
-				var spec = IrSpec.new(rootType, [rootType], impl);
+				var implReceiver = impl.receiver;
+				var spec = IrSpec.new(implReceiver, [implReceiver], impl);
 				record.values[t] = FuncVal.new(spec);
 			}
 		}
