@@ -25,19 +25,19 @@ class Verifier(compiler: Compiler, prog: Program) {
 		var vst = prog.vst;
 		for (f in vst.files) buildFile(f);
 		forAll(vst.classes, resolveSuperClass);
+		// Open enum: build the qualifier graph + assign DFS tags + finalize the shared
+		// EnumSetType BEFORE verifyComponent runs. Component / class verification can
+		// resolve TypeRefs that mention E.set, and resolveType caches the result on
+		// tref.binding — so the setType has to be the final hierarchy-shared one by
+		// then or those bindings end up pointing at a per-enum stale TypeCon.
+		forAll(vst.enums, computeEnumDefaultCase);
+		forAll(vst.enums, verifyEnumQualifiers);
+		forAll(vst.enums, verifyEnumParams);
+		forAll(vst.enums, assignEnumTagsIfRoot);
+		forAll(vst.enums, finalizeEnumSetTypeIfRoot);
 		forAll(vst.components, verifyComponent);
 		forAll(vst.classes, verifyClass);
 		forAll(vst.classes, assignVariantTagsIfRoot);
-		// Open enum: Pass A1 — compute hasDefault on every enum. Pass A2 — resolve qualifier
-		// chains and register subtypes on their parents. Each must complete on all enums before
-		// the next so a subtype can rely on its parent's state.
-		forAll(vst.enums, computeEnumDefaultCase);
-		forAll(vst.enums, verifyEnumQualifiers);
-		// Compute effectiveParams (root+ancestor extras+own extras) and extraParams for
-		// each subtype enum. Must run after verifyEnumQualifiers (parentEnum set) and
-		// before verifyEnum (which uses params via cv.verify → buildMembers).
-		forAll(vst.enums, verifyEnumParams);
-		forAll(vst.enums, assignEnumTagsIfRoot);
 		forAll(vst.enums, verifyEnum);
 		// Validate per-case method overrides. Must run after verifyEnum so each enum's
 		// memberMap is built; binds each per-case method to a root method by name.
@@ -770,6 +770,31 @@ class Verifier(compiler: Compiler, prog: Program) {
 		}
 		decl.tagHi = nextTag - 1;
 		return nextTag;
+	}
+	// Replace each open-enum hierarchy's root setType with one whose repType holds
+	// (root.tagHi + 1) bits; share that single EnumSetType across every descendant
+	// enum and its EnumType.setType pointer.
+	def finalizeEnumSetTypeIfRoot(decl: VstEnum) {
+		if (decl.qualifiers != null) return;
+		if (decl.tagHi < 0) return;
+		var bits = decl.tagHi + 1;
+		if (bits <= 0 || bits > Int.MAX_WIDTH) return;
+		var rootEnumType = EnumType.!(decl.typeCon.singleton);
+		var setName = Strings.builderOf(decl.token.image).puts(".set").toString();
+		var setTC = TypeCon.new(setName, Kind.ENUM_SET, 0, TypeUtil.globalCache);
+		var repType = Int.getType(false, bits);
+		var sharedSet = EnumSetType.new(setTC.uid, decl, repType, setTC);
+		setTC.singleton = sharedSet;
+		rootEnumType.setType = sharedSet;
+		propagateSharedSetType(decl, sharedSet);
+	}
+	def propagateSharedSetType(decl: VstEnum, shared: EnumSetType) {
+		for (l = decl.subtypeOrder; l != null; l = l.tail) {
+			var sub = l.head;
+			var subEnumType = EnumType.!(sub.typeCon.singleton);
+			subEnumType.setType = shared;
+			propagateSharedSetType(sub, shared);
+		}
 	}
 	def propagateEnumTagType(decl: VstEnum, tagType: IntType) {
 		decl.tagType = tagType;

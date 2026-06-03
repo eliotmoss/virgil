@@ -115,7 +115,10 @@ component TypeSystem {
 				}
 			}
 			x: EnumType => match (yt) {
-				y: EnumSetType => if (x.enumDecl == y.enumDecl) return Conversion.PROMOTE_ENUM_TO_SET;
+				// Enum-to-set: any enum value in a hierarchy promotes to the root's
+				// shared EnumSetType (E.More.C → E.set).
+				y: EnumSetType => if (V3.isEnumSubtypeOf(x.enumDecl, y.enumDecl)
+				                   || x.enumDecl == y.enumDecl) return Conversion.PROMOTE_ENUM_TO_SET;
 				y: EnumType => if (V3.isEnumSubtypeOf(x.enumDecl, y.enumDecl)) return Conversion.SUBSUME_ENUM;
 			}
 			x: FloatType => match (yt) {
