@@ -28,6 +28,12 @@ class Verifier(compiler: Compiler, prog: Program) {
 		forAll(vst.components, verifyComponent);
 		forAll(vst.classes, verifyClass);
 		forAll(vst.classes, assignVariantTagsIfRoot);
+		// Open enum: Pass A1 — compute hasDefault on every enum. Pass A2 — resolve qualifier
+		// chains and register subtypes on their parents. Each must complete on all enums before
+		// the next so a subtype can rely on its parent's state.
+		forAll(vst.enums, computeEnumDefaultCase);
+		forAll(vst.enums, verifyEnumQualifiers);
+		forAll(vst.enums, assignEnumTagsIfRoot);
 		forAll(vst.enums, verifyEnum);
 		forAll(vst.layouts, verifyLayout);
 		forAll(vst.exports, verifyExport);
@@ -507,6 +513,146 @@ class Verifier(compiler: Compiler, prog: Program) {
 		for (l = decl.subtypeOrder; l != null; l = l.tail) {
 			l.head.tagType = tagType;
 			propagateTagType(l.head, tagType);
+		}
+	}
+	// Pass A1: walk this enum's cases array to discover the user-written `case _` (if any) and
+	// record it on the VstEnum. Done as a separate first pass so subtype enums can rely on their
+	// parent's hasDefault when their own verifyEnumQualifiers runs.
+	def computeEnumDefaultCase(decl: VstEnum) {
+		for (c in decl.cases) {
+			if (Strings.equal(c.name(), "_")) {
+				decl.hasDefault = true;
+				decl.defaultCase = c;
+				break;
+			}
+		}
+		// Set rootEnum to self; verifyEnumQualifiers will overwrite for subtypes.
+		decl.rootEnum = decl;
+	}
+	// Pass A2: resolve qualifier chain for a subtype enum (`enum E.More`).
+	// Validates parent existence, that the parent has user-declared `case _`, that the subtype
+	// name does not clash with any of the parent's named cases, and that it is unique among the
+	// parent's subtypes. Registers the subtype on the parent and wires parentEnum / rootEnum.
+	def verifyEnumQualifiers(decl: VstEnum) {
+		var q = decl.qualifiers;
+		if (q == null) return;  // root enum: nothing to resolve
+		var cv = decl.verifier;
+		var firstTok = q.head;
+		var tc = prog.typeEnv.lookup(firstTok.image);
+		if (tc == null || tc.kind != Kind.ENUM) {
+			cv.errAtToken(firstTok).set("EnumDeclError",
+				Strings.format1("qualifier \"%s\" does not name an enum type", firstTok.image));
+			return;
+		}
+		var rootEnum = EnumType.!(tc.create0()).enumDecl;
+		var parentEnum = rootEnum;
+		if (parentEnum.qualifiers != null) {
+			cv.errAtToken(firstTok).set("EnumDeclError",
+				Strings.format1("\"%s\" must be a top-level enum type", firstTok.image));
+			return;
+		}
+		q = q.tail;
+		// Walk any remaining qualifiers (for names like E.More.Deep).
+		while (q != null) {
+			if (!parentEnum.hasDefault) {
+				cv.errAtToken(q.head).set("EnumDeclError",
+					Strings.format1("enum \"%s\" has no 'case _'", parentEnum.name()));
+				return;
+			}
+			var tok = q.head;
+			if (parentEnum.subtypes == null || parentEnum.subtypes[tok.image] == null) {
+				cv.errAtToken(tok).set("EnumDeclError",
+					Strings.format2("\"%s\" is not a direct subtype enum of \"%s\"",
+						tok.image, parentEnum.name()));
+				return;
+			}
+			parentEnum = parentEnum.subtypes[tok.image];
+			q = q.tail;
+		}
+		// parentEnum is now the immediate parent.
+		if (!parentEnum.hasDefault) {
+			cv.errAtDecl(decl).set("EnumDeclError",
+				Strings.format1("enum \"%s\" has no 'case _'", parentEnum.name()));
+			return;
+		}
+		// Subtype name must not clash with any named case of the parent.
+		var declName = decl.name();
+		for (c in parentEnum.cases) {
+			if (!Strings.equal(c.name(), "_") && Strings.equal(c.name(), declName)) {
+				cv.errAtDecl(decl).set("EnumDeclError",
+					Strings.format2("subtype name \"%s\" conflicts with case of \"%s\"",
+						declName, parentEnum.name()));
+				return;
+			}
+		}
+		// Name must be unique among direct subtypes of the parent.
+		if (parentEnum.subtypes == null) parentEnum.subtypes = Strings.newMap();
+		if (parentEnum.subtypes[declName] != null) {
+			cv.errAtDecl(decl).set("EnumDeclError",
+				Strings.format2("subtype \"%s\" of \"%s\" declared more than once",
+					declName, parentEnum.name()));
+			return;
+		}
+		parentEnum.subtypes[declName] = decl;
+		parentEnum.subtypeOrder = List.new(decl, parentEnum.subtypeOrder);
+		decl.parentEnum = parentEnum;
+		decl.rootEnum = rootEnum;
+	}
+	// Pass B: assigns global DFS tags to every case in a root enum's subtree, sets tagLo/tagHi
+	// on every node, widens the root's tagType to fit, and propagates it. Skips subtype enums.
+	// Note: EnumType.width and EnumSetType.repType are immutable; widening those will be done in
+	// a later phase when consumers start to depend on hierarchy-wide widths.
+	def assignEnumTagsIfRoot(decl: VstEnum) {
+		if (decl.qualifiers != null) return;	// skip subtypes
+		var nextTag = 0;
+		for (c in decl.cases) {
+			c.tag = nextTag;
+			c.tagHi = nextTag;
+			c.parentEnum = decl;
+			nextTag++;
+		}
+		if (decl.subtypeOrder != null) {
+			for (l = decl.subtypeOrder; l != null; l = l.tail) {
+				nextTag = assignEnumTagsDFS(l.head, nextTag);
+			}
+			if (decl.defaultCase != null) {
+				decl.defaultCase.tagHi = nextTag - 1;
+			}
+		}
+		decl.tagLo = 0;
+		decl.tagHi = nextTag - 1;
+		// Widen root's tagType to fit all DFS tags.
+		var width = 1, exp = 2;
+		while (exp < nextTag) { exp = exp << 1; width++; }
+		decl.tagType = Int.getType(false, width);
+		propagateEnumTagType(decl, decl.tagType);
+	}
+	def assignEnumTagsDFS(decl: VstEnum, startTag: int) -> int {
+		var nextTag = startTag;
+		decl.tagLo = nextTag;
+		for (c in decl.cases) {
+			c.tag = nextTag;
+			c.tagHi = nextTag;
+			c.parentEnum = decl;
+			nextTag++;
+		}
+		if (decl.subtypeOrder != null) {
+			for (l = decl.subtypeOrder; l != null; l = l.tail) {
+				nextTag = assignEnumTagsDFS(l.head, nextTag);
+			}
+			if (decl.defaultCase != null) {
+				decl.defaultCase.tagHi = nextTag - 1;
+			}
+		}
+		decl.tagHi = nextTag - 1;
+		return nextTag;
+	}
+	def propagateEnumTagType(decl: VstEnum, tagType: IntType) {
+		decl.tagType = tagType;
+		if (decl.subtypeOrder != null) {
+			for (l = decl.subtypeOrder; l != null; l = l.tail) {
+				propagateEnumTagType(l.head, tagType);
+			}
 		}
 	}
 	def verifyEnum(decl: VstEnum) {

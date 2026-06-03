@@ -459,7 +459,12 @@ component Parser {
 		return true;
 	}
 	def parseEnum(p: ParserState, file: VstFile, isPrivate: bool) -> bool {
-		var id = parseIdentVoid(p);
+		// Parse possibly-dotted name (open enum subtype declaration: `enum E.More { ... }`).
+		var triple = parseDottedTypeIdent(p);
+		var qualifiers = triple.0;
+		var qualifierTypeArgs = triple.1;
+		var id = triple.2;
+		if (id.params != null) p.error("enums cannot have type parameters");
 		var params = parseOptionalParams(p, parseEnumParam);
 		// Synthesize "tag" and "name" members
 		var tagToken = Token.new(p.fileName, "tag", p.curLine, p.curCol);
@@ -467,26 +472,69 @@ component Parser {
 		var list: List<VstMember>;
 		list = List.new(VstVariantTagMember.new(tagToken), list);
 		list = List.new(VstVariantNameMember.new(nameToken), list);
-		// Parse case members
+		// Parse case members and optional methods. Methods must follow cases after a `;` separator
+		// (matching the open_enums3b contract). A subtype enum may have no cases at all.
 		var cases = Vector<VstEnumCase>.new();
 		p.req1('{');
+		var inMethodSection = false;
+		var sawDefault = false;
 		while (true) {
 			if (p.curByte == '}') { p.advance1(); break; }
+			if (!inMethodSection && p.curByte == ';') {
+				p.advance1();
+				inMethodSection = true;
+				continue;
+			}
+			if (inMethodSection) {
+				var nlist = parseMember(p, list, false);
+				if (nlist == list) { p.opt1('}'); break; }
+				list = nlist;
+				continue;
+			}
+			if (sawDefault) {
+				p.error("'_' case must be last");
+				p.opt1('}');
+				break;
+			}
 			var c = parseEnumCase(p, cases.length);
 			if (c == null) { p.opt1('}'); break; }
+			if (Strings.equal(c.name(), "_")) sawDefault = true;
 			cases.put(c);
 			list = List.new(c, list);
 		}
 		var decl = VstEnum.new(isPrivate, id.name, params, cases.extract(), list);
+		decl.qualifiers = qualifiers;
+		decl.qualifierTypeArgs = qualifierTypeArgs;
 		file.enums.put(decl);
 		return true;
 	}
 	def parseEnumCase(p: ParserState, tag: int) -> VstEnumCase {
-		var id = parseIdentVoid(p);
+		var name: Token;
+		if (p.curByte == '_' && !Char.isIdentMiddle(p.peek(1))) {
+			// default case `_` for open enums
+			if (!p.enableOpenTypes) p.error("open enum default case '_' requires -open-types flag");
+			name = p.token(1);
+		} else {
+			var id = parseIdentVoid(p);
+			if (id.name.image.length == 0) return null;
+			name = id.name;
+		}
 		var args = if(p.curByte == '(', parseList(0, p, '(', COMMA, ')', parseExpr));
+		// Optional per-case method body: case A { def m() ... }
+		var members: List<VstMember>;
+		if (p.curByte == '{') {
+			p.advance1();
+			while (true) {
+				if (p.curByte == '}') { p.advance1(); break; }
+				var nlist = parseMember(p, members, false);
+				if (nlist == members) { p.opt1('}'); break; }
+				members = nlist;
+			}
+		}
 		p.opt1(',');
-		if (id.name.image.length > 0) return VstEnumCase.new(tag, id.name, args);
-		return null;
+		var c = VstEnumCase.new(tag, name, args);
+		c.members = Lists.reverse(members);
+		return c;
 	}
 	def parseLayout(p: ParserState, file: VstFile) -> bool {
 		var id = parseIdentVoid(p).name;

@@ -194,7 +194,22 @@ class VstComponent extends VstCompound {
 // Parsed "enum X { ... }"
 class VstEnum extends VstCompound {
 	def cases: Array<VstEnumCase>;
-	def tagType = V3.getTagType(cases.length);
+	var tagType = V3.getTagType(cases.length);	// resized by verifier Pass B once DFS tag count is known
+	// Open-enum hierarchy state. All null/zero/false for a closed enum.
+	var qualifiers: List<Token>;			// dot-prefix path, e.g. [E] for `enum E.More`
+	var qualifierTypeArgs: List<VstList<TypeRef>>;	// parallel to qualifiers; enums have no generics today
+	var parentEnum: VstEnum;			// immediate parent; null for root
+	var rootEnum: VstEnum;				// quick root pointer; `this` for root
+	var subtypes: HashMap<string, VstEnum>;		// direct subtypes (filled by verifier Pass A)
+	var subtypeOrder: List<VstEnum>;		// subtypes in reverse declaration order
+	var tagLo: int = -1;				// first DFS tag in this subtree (= variantTag for leaves)
+	var tagHi: int = -1;				// inclusive upper bound of DFS tag range
+	var hasDefault: bool;				// true iff this level declares user-written `case _`
+	var defaultCase: VstEnumCase;			// the user-written `case _`, if any
+	var extraParams: VstList<ParamDecl>;		// subtype-only fields (Stage 4+5)
+	var effectiveParams: List<ParamDecl>;		// resolved root + ancestor extras + own extras (set by Pass E)
+	var enumMethods: Array<VstMethod>;		// per-level method override table, indexed by root method index
+	var casesAll: Array<VstEnumCase>;		// DFS-order array including subtype cases (built by verifier)
 
 	new(isPrivate: bool, name: Token, params: VstList<ParamDecl>, cases, members: List<VstMember>)
 		super(isPrivate, name, null, params, null, members) {
@@ -235,8 +250,11 @@ class VstPacking extends VstCompound {
 
 // Member of an enum.
 class VstEnumCase extends VstMember {
-	def tag: int;
+	var tag: int;					// LOCAL tag at parse time; replaced by global DFS tag in Pass B
 	def args: VstList<Expr>;
+	var parentEnum: VstEnum;			// enum that lexically owns this case
+	var tagHi: int = -1;				// equals tag for leaves; for `case _` covers its parent's subtype range
+	var members: List<VstMember>;			// per-case method overrides (Strategy B), parsed from `case A { def m() ... }`
 	new(tag, name: Token, args) super(false, name) { }
 	def getType() -> Type {
 		return receiver.getDeclaredType();
