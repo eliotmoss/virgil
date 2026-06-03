@@ -1467,6 +1467,10 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 		}
 		// Try resolving on the (potentially more precise) static type of the receiver.
 		var xt = x.getType();
+		// Skip enum-subtype devirtualization: the subtype's IrClass indices don't share the
+		// root's slot layout, so resolveMethodImpl would index out of bounds. Open-enum
+		// virtual calls are resolved at runtime via the mtable instead.
+		if (V3.isEnum(xt) && xt != m.receiver) return null;
 		if (TypeSystem.isSubtype(xt, m.receiver)) {
 			var xm = context.prog.ir.resolveMethodImpl(xt, m);
 			if (!xm.member.flags.M_OVERRIDDEN) return xm;

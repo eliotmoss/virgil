@@ -592,7 +592,9 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 	}
 	def layoutMtable(rv: RaVirtual) {
 		if (rv.mtable != null) return;
-		var rm = rv.raMethod, rc = ra.getClass(rm.receiver);
+		var rm = rv.raMethod;
+		if (V3.isEnum(rm.receiver)) return layoutEnumMtable(rv);
+		var rc = ra.getClass(rm.receiver);
 		var size = rc.maxClassId - rc.minClassId;
 		if (ra.compiler.RaDevirtualize && size == 1) return; // no need for an mtable
 		var table = Array<IrMethod>.new(size), mtable = IrMtable.new(rm.norm, rc.minClassId, table);
@@ -628,6 +630,57 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 		if (rm != null && rm.virtual != null) rm.virtual.mtable = rv.mtable;
 		for (l = rc.children; l != null; l = l.tail) {
 			setMtable(l.head, rv);
+		}
+	}
+	// Build a dispatch mtable for an open-enum virtual method. The table is indexed by the
+	// receiver's integer tag (rootId = 0); each slot is the IrMethod to call for that tag.
+	// Walks the VstEnum hierarchy DFS: children (which may override) fill first, then this
+	// node fills any remaining tags in its range with its own impl (or the inherited one).
+	def layoutEnumMtable(rv: RaVirtual) {
+		var rm = rv.raMethod;
+		var rootDecl = EnumType.!(rm.receiver).enumDecl;
+		if (rootDecl.qualifiers != null) return;	// only build on the root
+		var size = rootDecl.tagHi + 1;
+		if (size <= 0) return;
+		var rootImpl = rm.norm;
+		// Mark M_OVERRIDDEN on the normalized root method so extractVirtualRef does not
+		// devirtualize back to a direct call.
+		rootImpl.flags |= IrFlag.M_OVERRIDDEN;
+		var table = Array<IrMethod>.new(size);
+		var mtable = IrMtable.new(rootImpl, 0, table);
+		rv.mtable = mtable;
+		var ft = Function.funcRefType(rootImpl.getMethodType());
+		mtable.record = ra.prog.newRecord(V3Array.newType(ft), size);
+		var methodName = rm.orig.source.name();
+		fillEnumMtable(rootDecl, methodName, rootImpl, rm.receiver, table, mtable.record);
+	}
+	def fillEnumMtable(decl: VstEnum, methodName: string, parentImpl: IrMethod,
+			   rootType: Type, table: Array<IrMethod>, record: Record) {
+		var impl = parentImpl;
+		if (decl.memberMap != null) {
+			var member = decl.memberMap[methodName];
+			if (VstMethod.?(member)) {
+				var vm = VstMethod.!(member);
+				var ic = ra.oldIr.makeIrClass(decl.getDeclaredType());
+				if (ic != null && vm.index >= 0 && vm.index < ic.methods.length) {
+					var subImpl = ic.methods[vm.index];
+					if (subImpl != null) impl = subImpl;
+				}
+			}
+		}
+		// Recurse first; subtypes' overrides fill their own tag ranges.
+		if (decl.subtypeOrder != null) {
+			for (l = decl.subtypeOrder; l != null; l = l.tail) {
+				fillEnumMtable(l.head, methodName, impl, rootType, table, record);
+			}
+		}
+		// Fill any remaining tags in our range with our impl.
+		for (t = decl.tagLo; t <= decl.tagHi; t++) {
+			if (table[t] == null) {
+				table[t] = impl;
+				var spec = IrSpec.new(rootType, [rootType], impl);
+				record.values[t] = FuncVal.new(spec);
+			}
 		}
 	}
 	def resolveMethodImpl(rc: RaClass, rm: RaMethod) -> RaMethod {

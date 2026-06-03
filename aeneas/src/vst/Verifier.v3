@@ -54,6 +54,12 @@ class Verifier(compiler: Compiler, prog: Program) {
 			vst.components.apply(addInitFor);
 			vst.classes.apply(addInitFor);
 			vst.enums.apply(addEnumVals);
+			// Force IrClass construction for every subtype enum so M_OVERRIDDEN propagates
+			// from ancestor methods even when no direct reference touches the subtype.
+			for (i < vst.enums.length) {
+				var e = vst.enums[i];
+				if (e.qualifiers != null) ir.makeIrClass(e.getDeclaredType());
+			}
 		}
 		if (mainMethod != null) {
 			var spec = ir.fromVstMemberAndType(mainMethod.receiver.getDeclaredType(), mainMethod);

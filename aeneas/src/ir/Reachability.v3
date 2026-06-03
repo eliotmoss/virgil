@@ -527,8 +527,44 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 		if (rm.isVirtual()) return;
 		rm.virtual = RaVirtual.new(rm);
 		var rc = makeClass(rm.receiver);
+		if (V3.isEnum(rm.receiver)) {
+			// Open-enum virtual: mark every subtype override of this method reachable.
+			markEnumVirtualImpls(EnumType.!(rm.receiver).enumDecl, rm);
+			return;
+		}
 		for (l = rc.subtypes; l != null; l = l.tail) {
 			analyzeVirtual(l.head, rm);
+		}
+	}
+	// Walk the enum hierarchy from the root; for each subtype that overrides `rm`'s method
+	// by name, force the corresponding IrMethod to be marked reachable so the dispatch
+	// table built in layoutEnumMtable references live methods.
+	def markEnumVirtualImpls(rootDecl: VstEnum, rm: RaMethod) {
+		if (!IrMethod.?(rm.orig)) return;
+		var name = IrMethod.!(rm.orig).source.name();
+		markEnumVirtualImplsRec(rootDecl, name);
+	}
+	def markEnumVirtualImplsRec(decl: VstEnum, name: string) {
+		if (decl.memberMap != null) {
+			var member = decl.memberMap[name];
+			if (VstMethod.?(member)) {
+				var vm = VstMethod.!(member);
+				var ic = oldIr.makeIrClass(decl.getDeclaredType());
+				if (ic != null && vm.index >= 0 && vm.index < ic.methods.length) {
+					var subImpl = ic.methods[vm.index];
+					if (subImpl != null) {
+						var ta: Array<Type> = [decl.getDeclaredType()];
+						var spec = IrSpec.new(decl.getDeclaredType(), ta, subImpl);
+						var impl = makeMethod(ta, subImpl, null);
+						getMethod(null, impl);
+					}
+				}
+			}
+		}
+		if (decl.subtypeOrder != null) {
+			for (l = decl.subtypeOrder; l != null; l = l.tail) {
+				markEnumVirtualImplsRec(l.head, name);
+			}
 		}
 	}
 	def getMethod(op: SsaApplyOp, rm: RaMethod) {

@@ -936,9 +936,15 @@ def evalOp(op: Operator, args: Arguments) -> Result {
 			return args.tailCall(spec, object, 1, args.vals.length);
 		}
 		CallVariantVirtual(method) => {
-			var object = getRecordReceiver(args);
 			var spec = args.getClosedIrSpec(method);
 			if (spec == null) return args.notFoldable(null);
+			if (V3.isEnum(spec.receiver)) {
+				// Open-enum virtual dispatch: resolve by walking the parentEnum chain.
+				var rec = args.vals[0];
+				spec = lookupEnumVirtual(args, rec, spec);
+				return args.tailCall(spec, rec, 1, args.vals.length);
+			}
+			var object = getRecordReceiver(args);
 			spec = lookupVariantVirtual(args, object, spec);
 			return args.tailCall(spec, object, 1, args.vals.length);
 		}
@@ -1172,6 +1178,47 @@ def lookupClassVirtual(args: Arguments, object: Record, spec: IrSpec) -> IrSpec 
 def lookupVariantVirtual(args: Arguments, object: Record, spec: IrSpec) -> IrSpec {
 	if (object != null) return args.getProgram().ir.resolveMethodImpl(object.rtype, spec);
 	return args.getProgram().ir.resolveVariantDefaultMethodImpl(spec);
+}
+// Resolve an open-enum virtual call to its concrete IrMethod by walking the parentEnum
+// hierarchy. Mirrors the dispatch-table layout built by Normalization.layoutEnumMtable:
+// each subtype whose tag range contains `tag` may override the method; the deepest such
+// override wins.
+def lookupEnumVirtual(args: Arguments, recv: Val, spec: IrSpec) -> IrSpec {
+	var tag = 0;
+	if (Box<int>.?(recv)) tag = Box<int>.!(recv).val;
+	var rootEnum = EnumType.!(spec.receiver).enumDecl;
+	if (!IrMethod.?(spec.member)) return spec;
+	var name = IrMethod.!(spec.member).source.name();
+	var impl: IrMember = spec.member;
+	var implReceiver = spec.receiver;
+	var cur = rootEnum;
+	while (cur != null) {
+		if (cur.memberMap != null) {
+			var member = cur.memberMap[name];
+			if (VstMethod.?(member)) {
+				var vm = VstMethod.!(member);
+				var ic = args.getProgram().ir.makeIrClass(cur.getDeclaredType());
+				if (ic != null && vm.index >= 0 && vm.index < ic.methods.length) {
+					var subImpl = ic.methods[vm.index];
+					if (subImpl != null) {
+						impl = subImpl;
+						implReceiver = cur.getDeclaredType();
+					}
+				}
+			}
+		}
+		var next: VstEnum;
+		if (cur.subtypeOrder != null) {
+			for (l = cur.subtypeOrder; l != null; l = l.tail) {
+				if (l.head.tagLo <= tag && tag <= l.head.tagHi) {
+					next = l.head;
+					break;
+				}
+			}
+		}
+		cur = next;
+	}
+	return IrSpec.new(implReceiver, [implReceiver], impl);
 }
 def getRecordReceiver(args: Arguments) -> Record {
 	// TODO: this a giant hack for adapting arguments to void calls
