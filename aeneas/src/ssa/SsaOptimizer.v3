@@ -1475,7 +1475,9 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 	}
 
 	def asRecord(i: SsaInstr) -> Record {
-		return if(SsaConst.?(i), Record.!(SsaConst.!(i).val));
+		if (!SsaConst.?(i)) return null;
+		var v = SsaConst.!(i).val;
+		return if(Record.?(v), Record.!(v));
 	}
 	def getFieldType(op: Operator, field: IrField) -> Type {
 		return if(op.isPolymorphic(), V3Op.extractIrSpec(op, field).getFieldType(), field.fieldType);

@@ -31,6 +31,7 @@ component VstIr {
 class IrBuilder(ctype: Type, parent: IrClass) {
 	def fields = Vector<IrField>.new();
 	def methods = Vector<IrMethod>.new();
+	var module: IrModule;
 
 	new() {
 		if (parent == null) {
@@ -118,10 +119,18 @@ class IrBuilder(ctype: Type, parent: IrClass) {
 			setIrMethod(r.index, ir);
 		} else {
 			// Subtype enum override of an ancestor enum's method (Stage 3.3). The subtype's
-			// IrClass keeps its own slot (no shared parent); the root's dispatch table is
-			// built separately so call sites on root-typed receivers can route to overrides.
+			// IrClass keeps its own slot (no shared parent); set M_OVERRIDDEN on the root
+			// enum's IrMethod so bestCallVirtual will route to virtual dispatch, and the
+			// dispatch-table builder picks this up for the root's table.
 			ir.flags |= IrFlag.M_OVERRIDE;
 			addIrMethod(ir);
+			if (module != null && VstEnum.?(r.receiver)) {
+				var rootIc = module.makeIrClass(r.receiver.getDeclaredType());
+				if (rootIc != null && r.index < rootIc.methods.length) {
+					var rootIr = rootIc.methods[r.index];
+					if (rootIr != null) rootIr.flags |= IrFlag.M_OVERRIDDEN;
+				}
+			}
 		}
 		m.index = ir.index;
 	}
