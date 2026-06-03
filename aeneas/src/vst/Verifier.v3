@@ -1156,6 +1156,19 @@ class VstCompoundVerifier {
 		}
 		var binding = lookupSuperMember(decl.name());
 		if (binding == null) {
+			// Open enum subtype: a method here may override an ancestor enum's method (Stage 3.3).
+			// Each subtype method gets its own IrClass slot so the subtype-static dispatch works;
+			// decl.root points to the root method so Phase 4's dispatch-table builder can stitch
+			// the per-tag override into the root's table.
+			if (VstEnum.?(compound)) {
+				var ancestor: VstMethod = lookupAncestorEnumMethod(VstEnum.!(compound), decl.name());
+				if (ancestor != null) {
+					decl.root = ancestor.root;
+					decl.index = compound.numMethods++;
+					verifier.methodOverrideChecks = List.new((this, decl), verifier.methodOverrideChecks);
+					return;
+				}
+			}
 			decl.root = decl;
 			decl.index = compound.numMethods++;
 			return;
@@ -1170,6 +1183,15 @@ class VstCompoundVerifier {
 			decl.root = superDecl.root;
 			verifier.methodOverrideChecks = List.new((this, decl), verifier.methodOverrideChecks);
 		}
+	}
+	// Walk the parentEnum chain looking for a method with the given name.
+	def lookupAncestorEnumMethod(decl: VstEnum, name: string) -> VstMethod {
+		for (e = decl.parentEnum; e != null; e = e.parentEnum) {
+			if (e.memberMap == null) continue;
+			var m = e.memberMap[name];
+			if (VstMethod.?(m)) return VstMethod.!(m);
+		}
+		return null;
 	}
 	def checkLayoutField(decl: VstLayoutField) {
 		if (isImport) errAtDecl(decl).ImportError("imported layouts cannot contain field declarations");
@@ -1228,6 +1250,13 @@ class VstCompoundVerifier {
 	}
 	def checkMethodOverride(decl: VstMethod) {
 		var binding = lookupSuperMember(decl.name()); // re-resolve member after return type inference
+		if (binding == null && VstEnum.?(compound)) {
+			// Subtype enum override of an ancestor enum's method.
+			var ancestor: VstMethod = lookupAncestorEnumMethod(VstEnum.!(compound), decl.name());
+			if (ancestor == null) return;
+			var memberType = ancestor.getType();
+			binding = ResolvedMember.new(compound.getDeclaredType(), ancestor, null, memberType);
+		}
 		var superDecl = VstMethod.!(binding.member);
 		var superMethodType = binding.memberType;
 		var methodType = decl.getType();

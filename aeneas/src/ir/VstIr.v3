@@ -111,11 +111,17 @@ class IrBuilder(ctype: Type, parent: IrClass) {
 		if (r == m) {
 			// this is the root method of a method family
 			addIrMethod(ir);
-		} else {
-			// this is an override
+		} else if (parent != null) {
+			// this is an override of a method on the superclass
 			parent.methods[r.index].flags |= IrFlag.M_OVERRIDDEN;
 			ir.flags |= IrFlag.M_OVERRIDE;
 			setIrMethod(r.index, ir);
+		} else {
+			// Subtype enum override of an ancestor enum's method (Stage 3.3). The subtype's
+			// IrClass keeps its own slot (no shared parent); the root's dispatch table is
+			// built separately so call sites on root-typed receivers can route to overrides.
+			ir.flags |= IrFlag.M_OVERRIDE;
+			addIrMethod(ir);
 		}
 		m.index = ir.index;
 	}

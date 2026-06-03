@@ -1,0 +1,10 @@
+//@execute 0=1; 1=2
+enum E { A, B, _; def m() -> int { return 1; } }
+enum E.More { C, D; def m() -> int { return 2; } }
+def main(i: int) -> int {
+	match (i) {
+		0 => return E.A.m();
+		1 => return E.More.C.m();
+	}
+	return -1;
+}
