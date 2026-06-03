@@ -465,7 +465,19 @@ component Parser {
 		var qualifierTypeArgs = triple.1;
 		var id = triple.2;
 		if (id.params != null) p.error("enums cannot have type parameters");
-		var params = parseOptionalParams(p, parseEnumParam);
+		// Subtype param forms: implicit (no clause), (super), (super, extras), or explicit
+		// (full restated list, possibly with extras). Root enums use the regular form.
+		var params: VstList<ParamDecl>;
+		var hasSuperKeyword = false;
+		var extraParamsList: List<ParamDecl>;
+		if (qualifiers != null) {
+			var r = parseSubtypeEnumParams(p);
+			params = r.0;
+			hasSuperKeyword = r.1;
+			extraParamsList = r.2;
+		} else {
+			params = parseOptionalParams(p, parseEnumParam);
+		}
 		// Synthesize "tag" and "name" members
 		var tagToken = Token.new(p.fileName, "tag", p.curLine, p.curCol);
 		var nameToken = Token.new(p.fileName, "name", p.curLine, p.curCol);
@@ -505,8 +517,48 @@ component Parser {
 		var decl = VstEnum.new(isPrivate, id.name, params, cases.extract(), list);
 		decl.qualifiers = qualifiers;
 		decl.qualifierTypeArgs = qualifierTypeArgs;
+		decl.hasSuperKeyword = hasSuperKeyword;
+		decl.extraParamsList = extraParamsList;
 		file.enums.put(decl);
 		return true;
+	}
+	// Parses a subtype enum's parameter clause. Returns (params, hasSuperKeyword, extraList).
+	// Forms accepted:
+	//   <nothing>                 → implicit: treat as super, no extras
+	//   ()                        → explicit empty (must match parent's empty params)
+	//   (super)                   → super, no extras
+	//   (super, x: int, ...)      → super + extras
+	//   (x: int, ...)             → explicit restated prefix + extras
+	def parseSubtypeEnumParams(p: ParserState) -> (VstList<ParamDecl>, bool, List<ParamDecl>) {
+		if (p.curByte != '(') return (null, true, null);  // implicit
+		var openTok = p.token(1);  // consumes '('
+		var sup = optKeyword(p, "super");
+		if (sup != null) {
+			var extras: List<ParamDecl>;
+			while (p.curByte == ',') {
+				p.advance1();
+				var pd = parseEnumParam(p);
+				if (pd != null) extras = List.new(pd, extras);
+			}
+			p.req1(')');
+			return (null, true, Lists.reverse(extras));
+		}
+		// Explicit form: collect comma-separated params until ')'.
+		if (p.curByte == ')') {
+			p.advance1();
+			var closeTok = p.tokenAt(p.curLine, p.curCol);
+			return (VstList<ParamDecl>.new(openTok.range(), null), false, null);
+		}
+		var rev: List<ParamDecl>;
+		var first = parseEnumParam(p);
+		if (first != null) rev = List.new(first, rev);
+		while (p.curByte == ',') {
+			p.advance1();
+			var pd = parseEnumParam(p);
+			if (pd != null) rev = List.new(pd, rev);
+		}
+		p.req1(')');
+		return (VstList<ParamDecl>.new(openTok.range(), Lists.reverse(rev)), false, null);
 	}
 	def parseEnumCase(p: ParserState, tag: int) -> VstEnumCase {
 		var name: Token;

@@ -409,9 +409,20 @@ class MethodEnv {
 		if (member == null) return lookupEnumExprMember(expr, enumType, false);
 		match (member.member) {
 			x: VstField => {
-				// bind literal fields
-				if (x.index > vc.args.length()) return VarBinding.None;
-				var arg = vc.args.asArray()[x.index];
+				// Find the arg position by locating the field's ParamDecl in the case's
+				// parent enum's effective params (inherited params first, then own extras
+				// for subtypes). The field's IrClass-local index is unreliable across
+				// hierarchy levels where x's index in the root and z's index in the
+				// subtype can collide.
+				var pos = -1, i = 0;
+				var ps: List<ParamDecl> = if(vc.parentEnum != null, vc.parentEnum.effectiveParams);
+				if (ps == null && enumType.enumDecl.params != null) ps = enumType.enumDecl.params.list;
+				for (l = ps; l != null; l = l.tail) {
+					if (l.head.member == x) { pos = i; break; }
+					i++;
+				}
+				if (pos < 0 || pos >= vc.args.length()) return VarBinding.None;
+				var arg = vc.args.asArray()[pos];
 				if (Literal.?(arg)) {
 					var val = Literal.!(arg).val;
 					return expr.bind(null, VarBinding.Const(val, x.getType()), x.getType());

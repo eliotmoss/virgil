@@ -33,6 +33,10 @@ class Verifier(compiler: Compiler, prog: Program) {
 		// the next so a subtype can rely on its parent's state.
 		forAll(vst.enums, computeEnumDefaultCase);
 		forAll(vst.enums, verifyEnumQualifiers);
+		// Compute effectiveParams (root+ancestor extras+own extras) and extraParams for
+		// each subtype enum. Must run after verifyEnumQualifiers (parentEnum set) and
+		// before verifyEnum (which uses params via cv.verify → buildMembers).
+		forAll(vst.enums, verifyEnumParams);
 		forAll(vst.enums, assignEnumTagsIfRoot);
 		forAll(vst.enums, verifyEnum);
 		// Validate per-case method overrides. Must run after verifyEnum so each enum's
@@ -141,15 +145,26 @@ class Verifier(compiler: Compiler, prog: Program) {
 		if (constructor != null && VstComponent.?(decl)) addInit(constructor);
 	}
 	def addEnumVals(decl: VstEnum) {
-		if (decl.params == null) return;
-		for (l = decl.params.list; l != null; l = l.tail) {
-			var field = VstField.!(l.head.member);
-			var arrayType = V3Array.newType(field.getType());
-			field.enumVals = prog.newRecord(arrayType, decl.cases.length);
-		}
+		// Only operate on roots; the recursive walk handles subtypes.
+		if (decl.qualifiers != null) return;
+		var size = decl.tagHi + 1;
+		if (size <= 0) size = decl.cases.length;  // unhappy path: tag assignment didn't run
+		allocEnumValsRec(decl, size);
 		var ic = prog.ir.makeIrClass(decl.getDeclaredType());
 		var constructor = ic.methods[0];
 		if (constructor != null) addInit(constructor);
+	}
+	def allocEnumValsRec(decl: VstEnum, size: int) {
+		// decl.getParams() returns root params on root, only own extras on subtypes.
+		for (l = decl.getParams(); l != null; l = l.tail) {
+			var field = VstField.!(l.head.member);
+			if (field == null || field.enumVals != null) continue;
+			var arrayType = V3Array.newType(field.getType());
+			field.enumVals = prog.newRecord(arrayType, size);
+		}
+		for (l = decl.subtypeOrder; l != null; l = l.tail) {
+			allocEnumValsRec(l.head, size);
+		}
 	}
 	def addInit(meth: IrMethod) {
 		var decl = VstNew.!(meth.source);
@@ -619,6 +634,95 @@ class Verifier(compiler: Compiler, prog: Program) {
 		decl.parentEnum = parentEnum;
 		decl.rootEnum = rootEnum;
 	}
+	// Append two lists (a ++ b). Reuses b directly when a is empty.
+	def listConcat<T>(a: List<T>, b: List<T>) -> List<T> {
+		if (a == null) return b;
+		var rev: List<T>;
+		for (l = a; l != null; l = l.tail) rev = List.new(l.head, rev);
+		var out = b;
+		while (rev != null) { out = List.new(rev.head, out); rev = rev.tail; }
+		return out;
+	}
+	// Compute effective + extra params for one enum. Root: effective = parsed params; no
+	// extras. Subtype with super/implicit form: effective = parent's effective ++ parsed
+	// extras. Subtype with explicit form: validates that the parsed param list has the
+	// parent's effective list as a prefix (by parameter name) and treats the tail as
+	// extras. Type-level prefix matching is deferred to typeCheckVstCompound.
+	def verifyEnumParams(decl: VstEnum) {
+		if (decl.qualifiers == null) {
+			// Root enum.
+			decl.effectiveParams = if(decl.params != null, decl.params.list, null);
+			return;
+		}
+		var parent = decl.parentEnum;
+		if (parent == null) return;  // verifyEnumQualifiers errored
+		var cv = decl.verifier;
+		var parentEffective = parent.effectiveParams;
+		if (decl.hasSuperKeyword) {
+			var extras = decl.extraParamsList;
+			resolveExtraParamTypes(cv, extras);
+			decl.effectiveParams = listConcat(parentEffective, extras);
+			if (extras != null) {
+				decl.extraParams = VstList<ParamDecl>.new(decl.token.range(), extras);
+			}
+		} else {
+			// Explicit form: parsed list must restate parent's prefix (by name). Redirect
+			// each restated prefix entry's .member to the parent's existing VstField and
+			// strip the duplicate field that buildMembers synthesized — there must be one
+			// shared enumVals array per param across the hierarchy.
+			var parsed = if(decl.params != null, decl.params.list, null);
+			var p = parentEffective, d = parsed;
+			while (p != null) {
+				if (d == null) {
+					cv.errAtDecl(decl).set("EnumParamError", Strings.format2(
+						"enum subtype must restate all %d ancestor params, got %d",
+						Lists.length(parentEffective),
+						Lists.length(parsed)));
+					return;
+				}
+				if (!Strings.equal(p.head.name(), d.head.name())) {
+					cv.errAtToken(d.head.token).set("EnumParamError", Strings.format2(
+						"restated param name \"%s\" does not match ancestor param \"%s\"",
+						d.head.name(), p.head.name()));
+					return;
+				}
+				// Redirect this param's .member to the inherited VstField; remove the
+				// duplicate field from this enum's members + memberMap.
+				var dupField = if(d.head.member != null, VstField.!(d.head.member));
+				d.head.member = p.head.member;
+				d.head.vtype = if(p.head.vtype != null, p.head.vtype);
+				if (dupField != null) removeDuplicateField(decl, dupField);
+				p = p.tail; d = d.tail;
+			}
+			decl.effectiveParams = parsed;
+			if (d != null) {
+				resolveExtraParamTypes(cv, d);
+				decl.extraParams = VstList<ParamDecl>.new(decl.token.range(), d);
+			}
+		}
+	}
+	// Strip a synthetic VstField from a subtype enum's members + memberMap. Used when an
+	// explicit-form param restates an inherited name and we redirect its .member to the
+	// parent's VstField instead of leaving a duplicate.
+	def removeDuplicateField(decl: VstEnum, dup: VstField) {
+		if (decl.memberMap != null) {
+			var entry = decl.memberMap[dup.name()];
+			if (entry == dup) decl.memberMap[dup.name()] = null;
+		}
+		var head: List<VstMember>;
+		for (l = decl.members; l != null; l = l.tail) {
+			if (l.head != dup) head = List.new(l.head, head);
+		}
+		decl.members = Lists.reverse(head);
+	}
+	// Resolve vtype on a list of subtype-only ParamDecls. Mirrors checkMethodParam's
+	// resolveType call; needed before typeCheckEnumCase reads params.head.vtype.
+	def resolveExtraParamTypes(cv: VstCompoundVerifier, ps: List<ParamDecl>) {
+		for (l = ps; l != null; l = l.tail) {
+			var p = l.head;
+			if (p.tref != null && p.vtype == null) p.vtype = cv.resolveType(p.tref, cv.compound.typeEnv);
+		}
+	}
 	// Pass B: assigns global DFS tags to every case in a root enum's subtree. Layout per node:
 	//   1. Named cases (excluding `_`) in declaration order.
 	//   2. Subtypes in declaration order.
@@ -915,29 +1019,33 @@ class Verifier(compiler: Compiler, prog: Program) {
 	}
 	def typeCheckEnumCase(decl: VstEnum, c: VstEnumCase, tc: TypeChecker) {
 		var cv = decl.verifier;
+		// The `_` case stands in for the union of subtype tag ranges; it never carries
+		// values of its own, so skip arg-vs-param matching.
+		if (Strings.equal(c.name(), "_")) return;
+		// Use effective params: inherited ancestor params plus this subtype's extras.
+		// Root enums and old (non-open) enums fall back to decl.params.list when
+		// effectiveParams isn't set up.
+		var paramSource = decl.effectiveParams;
+		if (paramSource == null && decl.params != null) paramSource = decl.params.list;
 		var paramTypes: List<Type>;
-		if (decl.params != null) {
-			// extract parameter types.
-			for (params = decl.params.list; params != null; params = params.tail) {
-				paramTypes = List.new(params.head.vtype, paramTypes);
-			}
-			paramTypes = Lists.reverse(paramTypes);
+		for (p = paramSource; p != null; p = p.tail) {
+			paramTypes = List.new(p.head.vtype, paramTypes);
 		}
+		paramTypes = Lists.reverse(paramTypes);
+		var arity = Lists.length(paramSource);
 		if (c.args != null) {
-			// typecheck arguments to enum.
 			var args = c.args.list;
 			var what = "case declaration";
 			for (i = 0; args != null; (args = args.tail, paramTypes = paramTypes.tail)) {
 				if (paramTypes != null) {
 					tc.typeCheckExpr(args.head, paramTypes.head, what);
 				} else {
-					cv.errAtExpr(args.head).ArityMismatch(what, decl.params.length(), c.args.length());
+					cv.errAtExpr(args.head).ArityMismatch(what, arity, c.args.length());
 					return;
 				}
 			}
-			if (paramTypes != null) cv.errAtDecl(c).ArityMismatch(what, decl.params.length(), c.args.length());
+			if (paramTypes != null) cv.errAtDecl(c).ArityMismatch(what, arity, c.args.length());
 		} else {
-			// expected parameters, but none were provided.
 			if (paramTypes != null) cv.errAtDecl(c).CaseDeclError("expected case arguments, but none provided");
 		}
 	}
