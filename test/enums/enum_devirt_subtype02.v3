@@ -1,0 +1,21 @@
+//@execute 0=1; 1=2
+// Per-case override in subtype blocks subtype-static devirtualization:
+// dispatch on x: E.More must stay virtual because E.More.B has its own impl
+// while E.More.C inherits the root's.
+enum E {
+	A, _;
+	def m() -> int { return 1; }
+}
+enum E.More { B { def m() -> int { return 2; } }, C; }
+
+def callOnMore(x: E.More) -> int { return x.m(); }
+
+def main(arg: int) -> int {
+	var b: E.More = E.More.B;
+	var c: E.More = E.More.C;
+	match (arg) {
+		0 => return callOnMore(c);
+		1 => return callOnMore(b);
+	}
+	return -1;
+}

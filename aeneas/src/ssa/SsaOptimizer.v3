@@ -1474,6 +1474,13 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 		// Try to constant-fold.
 		var r = asRecord(x);
 		if (r != null) 	return context.prog.ir.resolveMethodImpl(r.rtype, m); // devirtualize K
+		// Constant enum receiver: the integer constant IS the runtime tag. Resolve the
+		// specific impl that the mtable would pick for that tag (per-case override first,
+		// then the deepest enum in the hierarchy whose tag range covers it).
+		if (V3.isEnum(x.getType()) && SsaConst.?(x)) {
+			var ret = devirtualizeEnumConst(m, x);
+			if (ret != null) return ret;
+		}
 		// Pattern-match allocations.
 		if (optag == Opcode.ClassAlloc.tag || optag == Opcode.VariantAlloc.tag) {
 			return context.prog.ir.resolveMethodImpl(SsaApplyOp.!(x).op.typeArgs[0], m); // devirtualize {Class,Variant}Alloc
@@ -1491,13 +1498,57 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 		}
 		return null;
 	}
+	// Constant enum receiver: SsaConst's value is the tag (int boxed). Pick the same
+	// impl the runtime mtable would for that tag — per-case override first, then the
+	// deepest enum whose tag range covers it.
+	def devirtualizeEnumConst(m: IrSpec, x: SsaInstr) -> IrSpec {
+		if (!IrMethod.?(m.member)) return null;
+		var tag = V3.unboxI32(SsaConst.!(x).val);
+		var name = IrMethod.!(m.member).source.name();
+		var rootDecl = EnumType.!(m.receiver).enumDecl;
+		// Per-case override on the root method wins.
+		var rootMethod = findRootMethodDecl(rootDecl, name);
+		if (rootMethod != null && rootMethod.enumCaseImpls != null
+		    && tag >= 0 && tag < rootMethod.enumCaseImpls.length) {
+			var perCase = rootMethod.enumCaseImpls[tag];
+			if (perCase != null) {
+				return IrSpec.new(perCase.receiver, Arrays.replace(m.typeArgs, 0, perCase.receiver), perCase);
+			}
+		}
+		// Otherwise: walk from the root down to the deepest enum whose tag range covers
+		// `tag` and has its own subtype-level method override.
+		var cur = rootDecl;
+		var bestImpl: IrMethod;
+		var bestReceiver: Type = m.receiver;
+		while (cur != null) {
+			var impl = enumOverrideImpl(cur, name);
+			if (impl != null) { bestImpl = impl; bestReceiver = cur.getDeclaredType(); }
+			var next: VstEnum;
+			for (l = cur.subtypeOrder; l != null; l = l.tail) {
+				if (l.head.tagLo <= tag && tag <= l.head.tagHi) { next = l.head; break; }
+			}
+			cur = next;
+		}
+		if (bestImpl == null) return null;
+		return IrSpec.new(bestReceiver, Arrays.replace(m.typeArgs, 0, bestReceiver), bestImpl);
+	}
 	def devirtualizeEnumSubtype(m: IrSpec, xt: Type) -> IrSpec {
 		if (!IrMethod.?(m.member)) return null;
 		var subtypeDecl = EnumType.!(xt).enumDecl;
 		var name = IrMethod.!(m.member).source.name();
-		// If any strict descendant overrides this method, dispatch is non-uniform across
-		// xt's tag range; the runtime mtable must resolve it.
+		// If any strict descendant has a subtype-level OR per-case override, dispatch is
+		// non-uniform across xt's tag range; the runtime mtable must resolve it.
 		if (hasEnumDescendantOverride(subtypeDecl, name)) return null;
+		// Also block if any per-case override on the root method falls in xt's range.
+		var rootDecl = EnumType.!(m.receiver).enumDecl;
+		var rootMethod = findRootMethodDecl(rootDecl, name);
+		if (rootMethod != null && rootMethod.enumCaseImpls != null) {
+			var impls = rootMethod.enumCaseImpls;
+			var lo = subtypeDecl.tagLo, hi = subtypeDecl.tagHi;
+			for (t = lo; t <= hi; t++) {
+				if (t < impls.length && impls[t] != null) return null;
+			}
+		}
 		// Walk up (inclusive) to the nearest ancestor with an override; that's the uniform impl.
 		var cur = subtypeDecl;
 		while (cur != null) {
@@ -1509,6 +1560,12 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 			cur = cur.parentEnum;
 		}
 		return null;
+	}
+	def findRootMethodDecl(rootDecl: VstEnum, name: string) -> VstMethod {
+		if (rootDecl.memberMap == null) return null;
+		var member = rootDecl.memberMap[name];
+		if (!VstMethod.?(member)) return null;
+		return VstMethod.!(member).root;
 	}
 	def enumOverrideImpl(decl: VstEnum, name: string) -> IrMethod {
 		if (decl.memberMap == null) return null;
