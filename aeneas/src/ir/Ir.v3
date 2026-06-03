@@ -156,6 +156,13 @@ class IrSelector extends IrMember {
 // indexed by class ID, where class IDs are assigned during Reachability analysis.
 class IrMtable(root: IrMethod, rootId: int, table: Array<IrMethod>) extends IrItem {
 	var record: Record;
+	// Compact mtable (enum dispatch under -compact-mtable=N): tag-to-slot indirection
+	// where slotMap[tag] -> compactRecord[slot] -> impl. compactSlotMap and
+	// compactSlotType are shared across all methods of the same enum root (set
+	// redundantly per IrMtable for convenience at call sites).
+	var compactRecord: Record;
+	var compactSlotMap: Record;
+	var compactSlotType: IntType;
 
 	def render(buf: StringBuilder) -> StringBuilder {
 		buf.puts("[");

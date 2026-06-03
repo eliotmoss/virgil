@@ -75,6 +75,7 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 		}
 		ra.classes.apply(layoutVtable);
 		Lists.apply(virtuals, layoutMtable);
+		if (ra.compiler.CompactMtableThreshold > 0) compactEnumMtables();
 
 		if (wrappers != null) wrappers.createVirtualWrappers(this);
 
@@ -720,6 +721,83 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 				var spec = IrSpec.new(implReceiver, [implReceiver], implNorm);
 				record.values[t] = FuncVal.new(spec);
 			}
+		}
+	}
+	// Compact enum mtables under -compact-mtable=N. Groups RaVirtuals by enum root and,
+	// for each root, builds per-tag tuples of (impl_method0, impl_method1, ...) across all
+	// virtual methods on that root. Deduplicates tuples to produce a small set of distinct
+	// dispatch shapes. If numSlots/numTags falls within the threshold percentage, replaces
+	// each per-method numTags-sized record with a numSlots-sized one and builds a shared
+	// slotMap (tag -> slot) record. The dispatch becomes:
+	//   slot = slotMap[tag]; impl = compactRecord[slot]; call impl(...)
+	private def compactEnumMtables() {
+		var threshold = ra.compiler.CompactMtableThreshold;
+		// Group RaVirtuals by enum root receiver type.
+		var enumRoots = Vector<Type>.new();
+		var enumVirts = Vector<Vector<RaVirtual>>.new();
+		for (l = virtuals; l != null; l = l.tail) {
+			var rv = l.head;
+			if (rv.mtable == null || rv.mtable.record == null) continue;
+			if (!V3.isEnum(rv.raMethod.receiver)) continue;
+			var rec = rv.raMethod.receiver;
+			var found = -1;
+			for (i < enumRoots.length) {
+				if (enumRoots[i] == rec) { found = i; break; }
+			}
+			if (found < 0) {
+				found = enumRoots.length;
+				enumRoots.put(rec);
+				enumVirts.put(Vector<RaVirtual>.new());
+			}
+			enumVirts[found].put(rv);
+		}
+		for (i < enumRoots.length) {
+			compactOneEnumMtable(enumRoots[i], enumVirts[i], threshold);
+		}
+	}
+	private def compactOneEnumMtable(rootType: Type, rvs: Vector<RaVirtual>, threshold: int) {
+		var rootDecl = EnumType.!(rootType).enumDecl;
+		var numTags = rootDecl.tagHi + 1;
+		if (numTags <= 0) return;
+		var numMethods = rvs.length;
+		if (numMethods == 0) return;
+		// Build per-tag tuples and deduplicate. knownTuples[s] is the tuple for slot s.
+		var knownTuples = Vector<Array<IrMethod>>.new();
+		var tagToSlot = Array<int>.new(numTags);
+		for (tag < numTags) {
+			var tuple = Array<IrMethod>.new(numMethods);
+			for (m < numMethods) tuple[m] = rvs[m].mtable.table[tag];
+			var slot = -1;
+			for (k < knownTuples.length) {
+				if (Arrays.equal(tuple, knownTuples[k])) { slot = k; break; }
+			}
+			if (slot < 0) {
+				slot = knownTuples.length;
+				knownTuples.put(tuple);
+			}
+			tagToSlot[tag] = slot;
+		}
+		var numSlots = knownTuples.length;
+		// Only compact if the slot-to-tag percentage falls within threshold.
+		if (numSlots * 100 > threshold * numTags) return;
+		// Shared slotMap (tag -> slot). u8 for ≤256 slots, u16 otherwise.
+		var slotType = if(numSlots <= 256, Int.getType(false, 8), Int.getType(false, 16));
+		var slotArrayType = V3Array.newType(slotType);
+		var slotMapRecord = ra.prog.newRecord(slotArrayType, numTags);
+		for (tag < numTags) slotMapRecord.values[tag] = Int.box(tagToSlot[tag]);
+		// Per-method compact dispatch record (numSlots entries).
+		for (m < numMethods) {
+			var rv = rvs[m];
+			var origRecord = rv.mtable.record;
+			var compactRec = ra.prog.newRecord(origRecord.rtype, numSlots);
+			// Find one representative tag per slot and copy its FuncVal.
+			for (tag < numTags) {
+				var s = tagToSlot[tag];
+				if (compactRec.values[s] == null) compactRec.values[s] = origRecord.values[tag];
+			}
+			rv.mtable.compactRecord = compactRec;
+			rv.mtable.compactSlotMap = slotMapRecord;
+			rv.mtable.compactSlotType = slotType;
 		}
 	}
 	// Resolve an enum-method old IrMethod to its normalized IrMethod via RA's makeMethod

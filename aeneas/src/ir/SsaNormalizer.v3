@@ -306,10 +306,20 @@ class SsaRaNormalizer extends SsaRebuilder {
 						// - native: no Oop receiver; pass the tag as the first user argument
 						//   via CallFunctionDirect (which skips the Oop prepend).
 						var tag = ai_new[0];
-						var record = IrSelector.!(m.member).mtable.record;
-						var table = newGraph.valConst(record.rtype, record);
+						var mtable = IrSelector.!(m.member).mtable;
 						var tagType = EnumType.!(op.typeArgs[0]).enumDecl.tagType;
-						var func = curBlock.opArrayGetElem(record.rtype, tagType, Facts.O_SAFE_BOUNDS, table, tag);
+						var func: SsaInstr;
+						if (mtable.compactRecord != null) {
+							// Compact path: slot = slotMap[tag]; func = compactRecord[slot].
+							var slotMap = newGraph.valConst(mtable.compactSlotMap.rtype, mtable.compactSlotMap);
+							var slot = curBlock.opArrayGetElem(mtable.compactSlotMap.rtype, tagType, Facts.O_SAFE_BOUNDS, slotMap, tag);
+							var table = newGraph.valConst(mtable.compactRecord.rtype, mtable.compactRecord);
+							func = curBlock.opArrayGetElem(mtable.compactRecord.rtype, mtable.compactSlotType, Facts.O_SAFE_BOUNDS, table, slot);
+						} else {
+							var record = mtable.record;
+							var table = newGraph.valConst(record.rtype, record);
+							func = curBlock.opArrayGetElem(record.rtype, tagType, Facts.O_SAFE_BOUNDS, table, tag);
+						}
 						if (!context.compiler.NormConfig.NonRefClosureReceiver
 						    || context.compiler.NormConfig.ExplicitRefTypeCast) {
 							// JVM / wasm-gc: box the tag to Oop for the closure receiver slot
