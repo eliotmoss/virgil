@@ -761,10 +761,19 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 		if (numTags <= 0) return;
 		var numMethods = rvs.length;
 		if (numMethods == 0) return;
-		// Build per-tag tuples and deduplicate. knownTuples[s] is the tuple for slot s.
+		// Look up per-root live-tag tracking from reachability. If absent (no enum
+		// constants observed for this root), treat all tags as live conservatively.
+		var liveTags = ra.liveEnumTags[rootType];
+		var numLive = 0;
+		if (liveTags == null) numLive = numTags;
+		else for (tag < numTags) if (liveTags[tag]) numLive++;
+		if (numLive == 0) return;
+		// Build per-tag tuples for live tags only; dead tags map to slot 0 (any valid
+		// slot — they're unreachable at runtime so the dispatch never sees them).
 		var knownTuples = Vector<Array<IrMethod>>.new();
 		var tagToSlot = Array<int>.new(numTags);
 		for (tag < numTags) {
+			if (liveTags != null && !liveTags[tag]) continue;
 			var tuple = Array<IrMethod>.new(numMethods);
 			for (m < numMethods) tuple[m] = rvs[m].mtable.table[tag];
 			var slot = -1;
@@ -778,8 +787,8 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 			tagToSlot[tag] = slot;
 		}
 		var numSlots = knownTuples.length;
-		// Only compact if the slot-to-tag percentage falls within threshold.
-		if (numSlots * 100 > threshold * numTags) return;
+		// Only compact if the slot-to-live-tag percentage falls within threshold.
+		if (numSlots * 100 > threshold * numLive) return;
 		// Shared slotMap (tag -> slot). u8 for ≤256 slots, u16 otherwise.
 		var slotType = if(numSlots <= 256, Int.getType(false, 8), Int.getType(false, 16));
 		var slotArrayType = V3Array.newType(slotType);
@@ -790,8 +799,9 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 			var rv = rvs[m];
 			var origRecord = rv.mtable.record;
 			var compactRec = ra.prog.newRecord(origRecord.rtype, numSlots);
-			// Find one representative tag per slot and copy its FuncVal.
+			// Find one representative live tag per slot and copy its FuncVal.
 			for (tag < numTags) {
+				if (liveTags != null && !liveTags[tag]) continue;
 				var s = tagToSlot[tag];
 				if (compactRec.values[s] == null) compactRec.values[s] = origRecord.values[tag];
 			}

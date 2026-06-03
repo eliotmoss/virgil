@@ -48,6 +48,11 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 	var defaultValues: HashMap<Type, Val>;
 	var liveMethods = Vector<RaMethod>.new();
 	var normalizer: ReachabilityNormalizer;
+	// Per-root enum: which DFS tags appear as concrete values (SsaConst, ArrayAlloc
+	// default, etc.) anywhere in the reachable program. Consumed by
+	// ReachabilityNormalizer.compactEnumMtables to gate the slot-count threshold on
+	// live tags rather than all tags. Absent root → all tags conservatively live.
+	def liveEnumTags = TypeUtil.newTypeMap<Array<bool>>();
 
 	// perform the analysis, starting from the roots
 	def analyze() {
@@ -266,6 +271,7 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 			if (rm.orig.flags.M_EQUALS) return; // don't analyze equality methods
 			graph = compilation.genSsa(rm.getSpec(), 0);
 		}
+		analyzeLiveEnumTags(graph);
 		if (rm.spec != null) {
 			// analyze a polymorphic method
 			var polyOps = polyMap[rm.orig];
@@ -286,6 +292,42 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 				}
 			}
 		}
+	}
+	// Walk the graph's constants + array/struct allocations to record which enum tags
+	// are concretely produced anywhere in the program.
+	def analyzeLiveEnumTags(graph: SsaGraph) {
+		if (graph.values != null) {
+			for (v in graph.values) {
+				if (v == null) continue;
+				if (EnumType.?(v.vtype)) markEnumTagLive(EnumType.!(v.vtype), V3.unboxI32(v.val));
+			}
+		}
+		for (b in graph.bfBlocks(null)) {
+			for (i = b.next; i != b; i = i.next) {
+				if (!SsaApplyOp.?(i)) continue;
+				var apply = SsaApplyOp.!(i);
+				match (apply.op.opcode) {
+					ArrayAlloc => {
+						// Array<E>.new(n) zero-inits elements; tag 0 reaches dispatch.
+						var elemType = apply.op.typeArgs[0].nested.head;
+						if (EnumType.?(elemType)) markEnumTagLive(EnumType.!(elemType), 0);
+					}
+					_ => ;
+				}
+			}
+		}
+	}
+	def markEnumTagLive(et: EnumType, tag: int) {
+		var decl = et.enumDecl;
+		// Subtype enum constants still belong to the root's tag space.
+		while (decl.parentEnum != null) decl = decl.parentEnum;
+		var rootType = decl.getDeclaredType();
+		var arr = liveEnumTags[rootType];
+		if (arr == null) {
+			arr = Array<bool>.new(decl.tagHi + 1);
+			liveEnumTags[rootType] = arr;
+		}
+		if (tag >= 0 && tag < arr.length) arr[tag] = true;
 	}
 	// analyze the values in a graph
 	def analyzeValues(graph: SsaGraph) {
