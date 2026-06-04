@@ -107,6 +107,11 @@ class JvmProgram(compiler: Compiler, prog: Program) {
 			}
 			CLASS => jvmType(utype);
 			COMPONENT => jvmType(utype);
+			ENUM => {
+				// Open-enum methods live on a synthetic JvmClass (V3E_<name>) so call sites
+				// can use invokestatic with the enum tag passed as the first parameter.
+				if (ic.methods.length > 0) jrep.makeJvmEnumMethodHost(utype, ic);
+			}
 			_ => ;
 		}
 	}
@@ -158,11 +163,26 @@ class JvmProgram(compiler: Compiler, prog: Program) {
 	def mangleConvertName(prefix: string, exactType: Type, implicitType: Type) -> string {
 		return mangleTypeName(prefix, Function.newType(exactType, implicitType));
 	}
+	// Mangle an enum-method name for the V3E_<enum> class. Per-case and subtype overrides
+	// share the same source name as the root method, so JVM (which keys static methods by
+	// (name, descriptor)) would reject duplicates. Append the IrMethod's uid to make each
+	// override's static method distinct.
+	def mangleEnumMethod(m: IrMethod) -> string {
+		var base = V3.mangleIrMember(m);
+		if (m.flags.M_OVERRIDE || m.flags.M_OVERRIDDEN) {
+			return Strings.format2("%s_%d", base, m.uid);
+		}
+		return base;
+	}
 	def mangleClosureName(memberRef: IrSpec) -> string {
 		var buffer = StringBuilder.new();
 		buffer.puts(mangleTypeName("V3D_", memberRef.receiver));
 		buffer.puts("$D");
-		var methName = V3.mangleIrMember(memberRef.member);
+		// Use mangleEnumMethod for enum receivers so per-case / subtype overrides get
+		// distinct closure classes (V3.mangleIrMember collapses them to the source name).
+		var methName = if(V3.isEnum(memberRef.receiver) && IrMethod.?(memberRef.member),
+			mangleEnumMethod(IrMethod.!(memberRef.member)),
+			V3.mangleIrMember(memberRef.member));
 		buffer.puts(methName);
 		return buffer.toString();
 	}
@@ -481,6 +501,27 @@ class JvmV3ComponentGen extends JvmClassGen {
 		main_code.attach(main_meth);
 	}
 }
+// Generates a Jvm class to host static methods for an enum type. The enum's tag is passed
+// as the first (or sole) argument to each static method, since enums have no instance state
+// on the JVM (their JVM representation is `int`).
+class JvmV3EnumGen extends JvmClassGen {
+	def enumType: Type;
+	def ic: IrClass;
+	new(builder: JvmClassfileBuilder, enumType, ic) super(builder) { }
+	def build() {
+		for (m in ic.methods) buildMethod(m);
+		addEmptyInit();
+	}
+	def buildMethod(m: IrMethod) {
+		if (m == null || m.flags.M_ABSTRACT) return;
+		var name = builder.jprog.mangleEnumMethod(m);
+		// Enum methods are static; the receiver tag is passed as the first parameter.
+		var recvRep = builder.jprog.jrep.getRep(enumType);
+		var retType = builder.jprog.jrep.getRep(Function.getReturnType(m.getMethodType()));
+		var jsig = builder.jprog.makeJvmSig(recvRep, m.getMethodType(), retType);
+		genCode(builder, m, name, jsig, true);
+	}
+}
 // Generates a Jvm class representing a tuple
 class JvmV3TupleGen extends JvmClassGen {
 	def tupleType: Type;
@@ -577,6 +618,7 @@ class JvmV3ClosureGen extends JvmClassGen {
 			buildAbstractClass(invoke_meth);
 		} else {
 			if (V3.isComponent(memberRef.receiver)) buildComponentClosure(invoke_meth);
+			else if (V3.isEnum(memberRef.receiver)) buildEnumClosure(invoke_meth);
 			else buildClassClosure(invoke_meth);
 		}
 	}
@@ -628,6 +670,31 @@ class JvmV3ClosureGen extends JvmClassGen {
 		var jclass = builder.jprog.jvmClass(memberRef.receiver);
 		invoke_code.locals(invoke_sig.localsSize(true));
 		invoke_code.invokestatic(jclass.name, V3.mangleIrMember(memberRef.member), jvmSig(methType));
+		invoke_code.ret(jvmKind(Function.getReturnType(funcType)));
+		invoke_code.attach(invoke_meth);
+	}
+	// Closure for an enum method (static method on V3E_<root>). The receiver tag rides in the
+	// Oop slot as a boxed Integer; unbox it, append the method's other params, and invokestatic
+	// the user method with the tag-prepended signature that JvmV3EnumGen emits.
+	def buildEnumClosure(invoke_meth: JvmMethod) {
+		addEmptyInit();
+		emitSingletonField();
+
+		var invoke_code = builder.newCodeBuilder();
+		invoke_code.locals(invoke_sig.localsSize(true));
+		// local 0 = this; local 1 = Oop (boxed tag); locals 2.. = user params
+		invoke_code.aload_1();
+		invoke_code.checkcast(JvmTypes.java_lang_Integer);
+		invoke_code.invokevirtual(JvmTypes.java_lang_Integer.name, "intValue", JvmTypes.SIG_VOID_INT);
+		builder.emitLoadArguments(invoke_code, methType, methType, 2);
+		var jclass = builder.jprog.jvmClass(memberRef.receiver);
+		var recvRep = builder.jprog.jrep.getRep(memberRef.receiver);
+		var retType = builder.jprog.jrep.getRep(Function.getReturnType(methType));
+		var jsig = builder.jprog.makeJvmSig(recvRep, methType, retType);
+		var mname = if(IrMethod.?(memberRef.member),
+			builder.jprog.mangleEnumMethod(IrMethod.!(memberRef.member)),
+			V3.mangleIrMember(memberRef.member));
+		invoke_code.invokestatic(jclass.name, mname, jsig);
 		invoke_code.ret(jvmKind(Function.getReturnType(funcType)));
 		invoke_code.attach(invoke_meth);
 	}

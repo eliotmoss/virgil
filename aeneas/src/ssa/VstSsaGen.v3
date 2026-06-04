@@ -142,22 +142,34 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 	}
 	def addEnumParamInitCode(receiver: VstEnum, env: VstSsaEnv) {
 		context.method.flags |= IrFlag.M_ENUM_INIT;
-		var params = receiver.params.asArray();
-		var types = Array<Type>.new(params.length);
-		var consts = Array<SsaConst>.new(params.length);
-		for (i < params.length) {
-			var r = VstField.!(params[i].member).enumVals;
-			consts[i] = context.graph.valConst(r.rtype, r);
-			types[i] = r.rtype;
-		}
-		var cases = receiver.cases;
+		// Walk the whole hierarchy: the root's constructor populates field enumVals for
+		// every case (including subtype cases), keyed by the global DFS tag. Each case
+		// uses its parentEnum.effectiveParams to map args to the right fields.
+		emitEnumCaseInits(receiver, env);
+	}
+	def emitEnumCaseInits(decl: VstEnum, env: VstSsaEnv) {
+		var cases = decl.cases;
+		var paramSource = decl.effectiveParams;
+		if (paramSource == null && decl.params != null) paramSource = decl.params.list;
+		var params = Lists.toArray(paramSource);
+		// Index each tag via the case's global DFS tag (c.tag), not its declaration ordinal.
 		for (i < cases.length) {
-			var c = cases[i], args = c.args.asArray();
+			var c = cases[i];
+			if (c.args == null) continue;
+			var args = c.args.asArray();
 			for (j < args.length) {
+				if (j >= params.length) break;
+				var field = VstField.!(params[j].member);
+				if (field == null || field.enumVals == null) continue;
+				var r = field.enumVals;
+				var arrayConst = context.graph.valConst(r.rtype, r);
 				var val = env.genExpr(args[j]);
-				var index = context.graph.intConst(i);
-				env.opArraySetElem(types[j], Int.TYPE, Facts.O_SAFE_BOUNDS, consts[j], index, val);
+				var index = context.graph.intConst(c.tag);
+				env.opArraySetElem(r.rtype, Int.TYPE, Facts.O_SAFE_BOUNDS, arrayConst, index, val);
 			}
+		}
+		for (l = decl.subtypeOrder; l != null; l = l.tail) {
+			emitEnumCaseInits(l.head, env);
 		}
 	}
 	def getThisParam() -> SsaInstr {
@@ -578,6 +590,14 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 			// type case (first grammar rule "id: TypeRef"), generate "T.?(key)"
 			var query = V3Op.newTypeQuery(keyType, t);
 			return cur.addApply(null, query, [key]);
+		} else if (pat.tagHi > pat.tagLo) {
+			// open-enum subtype arm: emit `tagLo <= key && key <= tagHi`.
+			var lo = graph.valConst(keyType, Int.box(pat.tagLo));
+			var hi = graph.valConst(keyType, Int.box(pat.tagHi));
+			var itype = IntType.!(keyType);
+			var chkLo = cur.addApply(null, itype.opLtEq(), [lo, key]);
+			var chkHi = cur.addApply(null, itype.opLtEq(), [key, hi]);
+			return cur.addApply(null, V3Op.opBoolAnd, [chkLo, chkHi]);
 		} else {
 			// this is a value / tag case, generate "key == const"
 			var const = graph.valConst(keyType, pat.val);
@@ -598,6 +618,10 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 					var r = Eval.doQuery0(keyType, t, val);
 					if (r) return true;
 				}
+			} else if (pat.tagHi > pat.tagLo) {
+				// open-enum subtype range pattern
+				var tagVal = Int.unbox(val);
+				if (tagVal >= pat.tagLo && tagVal <= pat.tagHi) return true;
 			} else if (Values.equal(val, pat.val)) {
 				return true;
 			}

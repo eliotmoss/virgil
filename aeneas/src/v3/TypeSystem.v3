@@ -115,7 +115,11 @@ component TypeSystem {
 				}
 			}
 			x: EnumType => match (yt) {
-				y: EnumSetType => if (x.enumDecl == y.enumDecl) return Conversion.PROMOTE_ENUM_TO_SET;
+				// Enum-to-set: any enum value in a hierarchy promotes to the root's
+				// shared EnumSetType (E.More.C → E.set).
+				y: EnumSetType => if (V3.isEnumSubtypeOf(x.enumDecl, y.enumDecl)
+				                   || x.enumDecl == y.enumDecl) return Conversion.PROMOTE_ENUM_TO_SET;
+				y: EnumType => if (V3.isEnumSubtypeOf(x.enumDecl, y.enumDecl)) return Conversion.SUBSUME_ENUM;
 			}
 			x: FloatType => match (yt) {
 				y: FloatType => if (x.width <= y.width) return Conversion.PROMOTE_FLOAT_TO_FLOAT;
@@ -230,6 +234,19 @@ component TypeSystem {
 				y: ClassType => return if(V3.isVariant(y), Conversion.CAST_VARIANT, Conversion.CAST_CLASS);
 				y: FuncType => {
 					if(y.typeCon.kind == Kind.FUNCREF) return Conversion.CAST_FUNCREF;
+				}
+			}
+			x: EnumType => match (yt) {
+				y: EnumType => {
+					if (V3.isEnumSubtypeOf(y.enumDecl, x.enumDecl)) {
+						// Downcast E -> E.More: tag range test.
+						return Conversion.CAST_ENUM;
+					}
+					if (V3.isEnumSubtypeOf(x.enumDecl, y.enumDecl)) {
+						// Upcast E.More -> E: no representation change.
+						return Conversion.SUBSUME_ENUM;
+					}
+					return Conversion.ILLEGAL;
 				}
 			}
 		}
@@ -485,6 +502,7 @@ component TypeSystem {
 			SUBSUME_NULL_FUNC => 		return TN;
 			SUBSUME_CLASS =>		return TN;
 			SUBSUME_VARIANT => 		return T;
+			SUBSUME_ENUM => 		return T;
 			SUBSUME_ARRAY => 		return TN;
 			SUBSUME_RANGE => 		return T;
 			SUBSUME_FUNCTION => 		return TN;
@@ -501,6 +519,7 @@ component TypeSystem {
 			CAST_POLY => 			return U;
 			CAST_CLASS =>			return TypeQuery.CLASS_QUERY;
 			CAST_VARIANT => 		return TypeQuery.VARIANT_QUERY;
+			CAST_ENUM => 			return TypeQuery.ENUM_QUERY;
 			CAST_ARRAY => 		 	return F;
 			CAST_ARRAY_TO_RANGE =>  	return F;
 			CAST_RANGE =>			return F;
@@ -587,6 +606,11 @@ component TypeSystem {
 			}
 		}
 		if (isEnumToSet(fromType, toType)) return TypeCast.ENUM_TO_SET;
+		if (EnumType.?(fromType) && EnumType.?(toType)) {
+			var fe = EnumType.!(fromType).enumDecl, te = EnumType.!(toType).enumDecl;
+			if (V3.isEnumSubtypeOf(te, fe)) return TypeCast.ENUM_CAST;	// downcast E -> E.More
+			if (V3.isEnumSubtypeOf(fe, te)) return TypeCast.SUBSUME;	// upcast E.More -> E
+		}
 		if (V3.isRange(toType)) {
 			if (fromType == Null.TYPE) return TypeCast.TRUE;
 			if (V3.isArray(fromType)) {
@@ -611,7 +635,11 @@ component TypeSystem {
 					if(y.typeCon.kind == Kind.FUNCREF) return TypeCast.TRUE; // TODO: funcref cast
 				}
 			}
+			if (PrimType.?(toType)) return TypeCast.TRUE; // Oop → primitive: backends unbox
 		}
+		// Primitive → Oop: backends materialize boxing (Integer.valueOf / ref.i31);
+		// interpreter passes the value through unchanged.
+		if (PrimType.?(fromType) && toType == Oop.TYPE) return TypeCast.TRUE;
 		return TypeCast.THROW;
 	}
 	def maybeQuery(t1: Type, t2: Type, eq: TypeQuery, neq: TypeQuery) -> TypeQuery {
@@ -657,6 +685,7 @@ enum TypeCast {
 	FLOAT_CAST_D,
 	CLASS_CAST,
 	VARIANT_CAST,
+	ENUM_CAST,	// open-enum subtype downcast — tag range check
 	TUPLE_CAST,
 	ENUM_TO_SET,
 	RANGE_PROMOTE_ARRAY
@@ -673,6 +702,7 @@ enum TypeQuery {
 	FLOAT_QUERY_D,
 	CLASS_QUERY,
 	VARIANT_QUERY,
+	ENUM_QUERY,	// open-enum subtype tag-range test
 	TUPLE_QUERY
 }
 
@@ -734,6 +764,7 @@ enum Conversion {
 	SUBSUME_NULL_FUNC,
 	SUBSUME_CLASS,
 	SUBSUME_VARIANT,
+	SUBSUME_ENUM,	// open-enum subtype upcast (E.More -> E)
 	SUBSUME_ARRAY,
 	SUBSUME_RANGE,
 	SUBSUME_FUNCTION,
@@ -750,6 +781,7 @@ enum Conversion {
 	CAST_POLY,
 	CAST_CLASS,
 	CAST_VARIANT,
+	CAST_ENUM,	// open-enum subtype downcast (E -> E.More) — tag range test
 	CAST_ARRAY,
 	CAST_ARRAY_TO_RANGE,
 	CAST_RANGE,

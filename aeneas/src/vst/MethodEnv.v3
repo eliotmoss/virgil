@@ -162,7 +162,19 @@ class MethodEnv {
 		return VarBinding.None;
 	}
 	def resolveEnumMember(expr: VarExpr, enumType: EnumType, name: string) -> ResolvedMember {
-		return resolveCompoundMember(expr, enumType, enumType, enumType.enumDecl, name);
+		// First try this enum's own members; fall back to ancestor enums (parentEnum chain)
+		// so subtypes inherit root- or ancestor-declared methods. Carry the declaring
+		// enum's type as containerType so the resolved member's `receiver` points at the
+		// declaring enum — matching the class-side convention in resolveClassMember.
+		var decl = enumType.enumDecl;
+		var containerType: Type = enumType;
+		while (decl != null) {
+			var result = resolveCompoundMember(expr, enumType, containerType, decl, name);
+			if (result != null) return result;
+			decl = decl.parentEnum;
+			if (decl != null) containerType = decl.getDeclaredType();
+		}
+		return null;
 	}
 	def resolveClassMember(expr: VarExpr, classType: ClassType, name: string) -> ResolvedMember {
 		var exprType = classType;
@@ -333,7 +345,18 @@ class MethodEnv {
 			return expr.bind(null, VarBinding.Const(Int.box(count), countType), countType);
 		}
 		var member = resolveEnumMember(expr, enumType, name);
-		if (member == null) return VarBinding.None;
+		if (member == null) {
+			// Open enum: name may refer to a direct subtype of this enum (E.More).
+			var subtypes = enumType.enumDecl.subtypes;
+			if (subtypes != null) {
+				var subDecl = subtypes[name];
+				if (subDecl != null) {
+					var subType = EnumType.!(subDecl.typeCon.create0());
+					return expr.bind(null, VarBinding.Type(subType), subType);
+				}
+			}
+			return VarBinding.None;
+		}
 		match (member.member) {
 			x: VstField => {
 				var memberType = Function.newType(enumType, member.memberType);
@@ -358,9 +381,12 @@ class MethodEnv {
 		var name = expr.ident.name;
 		var member = resolveEnumMember(expr, enumType, name.image);
 		if (member == null) return VarBinding.None;
+		var receiver = objExpr(useThis, name, expr);
 		match (member.member) {
 			x: VstField => {
-				return newApplyCompBinding(expr, expr.expr, enumType.enumGetParamOperator(x));
+				// Pass the synthesized `receiver` (handles useThis), not `expr.expr` (which
+				// is null for implicit-this reads inside an enum method body).
+				return newApplyCompBinding(expr, receiver, enumType.enumGetParamOperator(x));
 			}
 			x: VstVariantTagMember => {
 				var tagType = enumType.enumDecl.tagType;
@@ -369,6 +395,9 @@ class MethodEnv {
 			}
 			x: VstVariantNameMember => {
 				return newApplyCompBinding(expr, expr.expr, enumType.getNameOperator());
+			}
+			x: VstMethod => {
+				return expr.bind(receiver, VarBinding.ObjectMethod(member.receiver, x, member.typeArgs), member.memberType);
 			}
 		}
 		return VarBinding.None;
@@ -380,9 +409,20 @@ class MethodEnv {
 		if (member == null) return lookupEnumExprMember(expr, enumType, false);
 		match (member.member) {
 			x: VstField => {
-				// bind literal fields
-				if (x.index > vc.args.length()) return VarBinding.None;
-				var arg = vc.args.asArray()[x.index];
+				// Find the arg position by locating the field's ParamDecl in the case's
+				// parent enum's effective params (inherited params first, then own extras
+				// for subtypes). The field's IrClass-local index is unreliable across
+				// hierarchy levels where x's index in the root and z's index in the
+				// subtype can collide.
+				var pos = -1, i = 0;
+				var ps: List<ParamDecl> = if(vc.parentEnum != null, vc.parentEnum.effectiveParams);
+				if (ps == null && enumType.enumDecl.params != null) ps = enumType.enumDecl.params.list;
+				for (l = ps; l != null; l = l.tail) {
+					if (l.head.member == x) { pos = i; break; }
+					i++;
+				}
+				if (pos < 0 || pos >= vc.args.length()) return VarBinding.None;
+				var arg = vc.args.asArray()[pos];
 				if (Literal.?(arg)) {
 					var val = Literal.!(arg).val;
 					return expr.bind(null, VarBinding.Const(val, x.getType()), x.getType());
@@ -529,10 +569,9 @@ class MethodEnv {
 		if (Strings.equal(name, "all")) {
 			return expr.bind(null, VarBinding.Const(tc.repType.max, etype), etype);
 		}
-		var c = tc.enumDecl.memberMap[name];
-		if (VstEnumCase.?(c)) {
-			// simple membership check
-			var op = V3Op.newVstSugar(VstOperator.EnumSetHas(VstEnumCase.!(c)), TypeUtil.NO_TYPES, [etype], Bool.TYPE);
+		var c = findEnumCaseInHierarchy(tc.enumDecl, name);
+		if (c != null) {
+			var op = V3Op.newVstSugar(VstOperator.EnumSetHas(c), TypeUtil.NO_TYPES, [etype], Bool.TYPE);
 			return newCompBinding(expr, op);
 		}
 		return VarBinding.None;
@@ -540,13 +579,26 @@ class MethodEnv {
 	def lookupEnumSetExprMember(expr: VarExpr, etype: Type) -> VarBinding {
 		var name = expr.ident.name.image;
 		var tc = EnumSetType.!(etype);
-		var c = tc.enumDecl.memberMap[name];
-		if (VstEnumCase.?(c)) {
-			// simple membership check
-			var op = V3Op.newVstSugar(VstOperator.EnumSetHas(VstEnumCase.!(c)), TypeUtil.NO_TYPES, [etype], Bool.TYPE);
+		var c = findEnumCaseInHierarchy(tc.enumDecl, name);
+		if (c != null) {
+			var op = V3Op.newVstSugar(VstOperator.EnumSetHas(c), TypeUtil.NO_TYPES, [etype], Bool.TYPE);
 			return newApplyCompBinding(expr, expr.expr, op);
 		}
 		return VarBinding.None;
+	}
+	// Walk the enum hierarchy starting at decl looking for a VstEnumCase named `name`.
+	// Open-enum set lookups (E.set.More.C → s.C) need to reach cases declared on subtype
+	// enums of the same hierarchy because all share one EnumSetType.
+	def findEnumCaseInHierarchy(decl: VstEnum, name: string) -> VstEnumCase {
+		if (decl.memberMap != null) {
+			var m = decl.memberMap[name];
+			if (VstEnumCase.?(m)) return VstEnumCase.!(m);
+		}
+		for (l = decl.subtypeOrder; l != null; l = l.tail) {
+			var c = findEnumCaseInHierarchy(l.head, name);
+			if (c != null) return c;
+		}
+		return null;
 	}
 	def lookupRefTypeMember(expr: VarExpr, refType: RefType) -> VarBinding {
 		var name = expr.ident.name.image;

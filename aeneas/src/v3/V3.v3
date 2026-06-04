@@ -62,6 +62,13 @@ component V3 {
 	def isTuple(t: Type) -> bool { return TupleType.?(t); }
 	def isEnum(t: Type) -> bool { return EnumType.?(t); }
 	def isEnumSet(t: Type) -> bool { return EnumSetType.?(t); }
+	// True iff {child} is in {parent}'s open-enum subtree (transitively), or child == parent.
+	def isEnumSubtypeOf(child: VstEnum, parent: VstEnum) -> bool {
+		for (e = child; e != null; e = e.parentEnum) {
+			if (e == parent) return true;
+		}
+		return false;
+	}
 	def isString(t: Type) -> bool { return t == stringType; }
 	def isRef(t: Type) -> bool { return RefType.?(t); }
 	def classDecl(t: Type) -> VstClass {

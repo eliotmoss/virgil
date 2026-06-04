@@ -224,14 +224,52 @@ class SsaRaNormalizer extends SsaRebuilder {
 			VariantGetField(field) =>	normGetField(true, i_old, field, op);
 			VariantGetMethod(method) => {
 				var obj = genRef1(args[0]);
+				// Enum closure capture on JVM / wasm-gc: the closure invoke expects an
+				// Oop in the receiver slot (Phase 4's buildEnumClosure unboxes it back to
+				// the tag). Box int → Oop here.
+				if (V3.isEnum(op.typeArgs[0]) && needsBoxedEnumReceiver()) {
+					var tagType = EnumType.!(op.typeArgs[0]).enumDecl.tagType;
+					obj = curBlock.opTypeSubsume(tagType, Oop.TYPE, obj);
+				}
 				mapN(i_old, [funcRef(extractMethodRef(orig, method).1), obj]);
 			}
 			VariantGetVirtual(method) => {
 				var t = extractVirtualRef(orig, method), obj = genRef1(args[0]);
 				if (t.2) { // still a virtual dispatch
-					mapN(i_old, [curBlock.opGetSelector(t.1, obj), obj]);
+					if (V3.isEnum(op.typeArgs[0])) {
+						// Enum closure capture: receiver IS the tag. Load the impl from
+						// the per-root mtable record at tag, mirroring CallVariantVirtual.
+						// Then box the tag for ref-typed closure-receiver slots on
+						// JVM/wasm-gc.
+						var sel = IrSelector.!(t.1.member);
+						var mtable = sel.mtable;
+						var tagType = EnumType.!(op.typeArgs[0]).enumDecl.tagType;
+						var func: SsaInstr;
+						if (mtable.compactRecord != null) {
+							var slotMap = newGraph.valConst(mtable.compactSlotMap.rtype, mtable.compactSlotMap);
+							var slot = curBlock.opArrayGetElem(mtable.compactSlotMap.rtype, tagType, Facts.O_SAFE_BOUNDS, slotMap, obj);
+							var table = newGraph.valConst(mtable.compactRecord.rtype, mtable.compactRecord);
+							func = curBlock.opArrayGetElem(mtable.compactRecord.rtype, mtable.compactSlotType, Facts.O_SAFE_BOUNDS, table, slot);
+						} else {
+							var record = mtable.record;
+							var table = newGraph.valConst(record.rtype, record);
+							func = curBlock.opArrayGetElem(record.rtype, tagType, Facts.O_SAFE_BOUNDS, table, obj);
+						}
+						var stored = obj;
+						if (needsBoxedEnumReceiver()) {
+							stored = curBlock.opTypeSubsume(tagType, Oop.TYPE, obj);
+						}
+						mapN(i_old, [func, stored]);
+					} else {
+						mapN(i_old, [curBlock.opGetSelector(t.1, obj), obj]);
+					}
 				} else {
-					mapN(i_old, [funcRef(t.1), obj]);
+					var stored = obj;
+					if (V3.isEnum(op.typeArgs[0]) && needsBoxedEnumReceiver()) {
+						var tagType = EnumType.!(op.typeArgs[0]).enumDecl.tagType;
+						stored = curBlock.opTypeSubsume(tagType, Oop.TYPE, obj);
+					}
+					mapN(i_old, [funcRef(t.1), stored]);
 				}
 			}
 			Init =>				map0(i_old);
@@ -298,7 +336,52 @@ class SsaRaNormalizer extends SsaRebuilder {
 				var t = extractVirtualRef(orig, method), funcNorm = t.0, m = t.1;
 				var ai_new = normArgs(funcNorm, genRefs(i_old.inputs));
 				if (t.2) { // still a virtual dispatch
-					if (rc.isUnboxed()) {
+					if (V3.isEnum(op.typeArgs[0])) {
+						// Open-enum virtual: receiver value IS the tag. Look up the function
+						// from the per-root mtable, then call it. Backends differ:
+						// - JVM / ref-typed-closure-receiver: box the tag to Oop so it can ride
+						//   in the closure receiver slot; user args are the remainder.
+						// - native: no Oop receiver; pass the tag as the first user argument
+						//   via CallFunctionDirect (which skips the Oop prepend).
+						var tag = ai_new[0];
+						var mtable = IrSelector.!(m.member).mtable;
+						var tagType = EnumType.!(op.typeArgs[0]).enumDecl.tagType;
+						var func: SsaInstr;
+						if (mtable.compactRecord != null) {
+							// Compact path: slot = slotMap[tag]; func = compactRecord[slot].
+							var slotMap = newGraph.valConst(mtable.compactSlotMap.rtype, mtable.compactSlotMap);
+							var slot = curBlock.opArrayGetElem(mtable.compactSlotMap.rtype, tagType, Facts.O_SAFE_BOUNDS, slotMap, tag);
+							var table = newGraph.valConst(mtable.compactRecord.rtype, mtable.compactRecord);
+							func = curBlock.opArrayGetElem(mtable.compactRecord.rtype, mtable.compactSlotType, Facts.O_SAFE_BOUNDS, table, slot);
+						} else {
+							var record = mtable.record;
+							var table = newGraph.valConst(record.rtype, record);
+							func = curBlock.opArrayGetElem(record.rtype, tagType, Facts.O_SAFE_BOUNDS, table, tag);
+						}
+						if (!context.compiler.NormConfig.NonRefClosureReceiver
+						    || context.compiler.NormConfig.ExplicitRefTypeCast) {
+							// JVM / wasm-gc: box the tag to Oop for the closure receiver slot
+							var boxedTag = curBlock.opTypeSubsume(tagType, Oop.TYPE, tag);
+							var userArgs = Arrays.range(ai_new, 1, ai_new.length);
+							var userParamType: Type = Void.TYPE;
+							if (userArgs.length > 0) {
+								var pTypes = Array<Type>.new(userArgs.length);
+								for (j < userArgs.length) pTypes[j] = userArgs[j].getType();
+								userParamType = Tuple.fromTypeArray(pTypes);
+							}
+							var userFuncType = Function.newType(userParamType, funcNorm.sig().returnType());
+							ai_new = Arrays.concat([func, boxedTag], userArgs);
+							normCall(i_old, funcNorm, V3Op.newCallFunction(userFuncType), ai_new);
+						} else {
+							// native: tag stays as a scalar arg; no Oop receiver. The funcref
+							// type includes the enum receiver so the op signature is
+							// (enum-receiver, args...), matching the mtable record's element type.
+							var enumType = op.typeArgs[0];
+							var nativeFuncType = Function.prependParamType(enumType, funcNorm.sub[0]);
+							ai_new = Arrays.prepend(func, ai_new);
+							normCall(i_old, funcNorm, V3Op.newCallFunctionDirect(nativeFuncType), ai_new);
+						}
+					} else if (rc.isUnboxed()) {
 						// use the variant tag as an index into a table of functions
 						var tag = normVariantGetTag(rc.variantNorm, ai_new);
 						var record = IrSelector.!(m.member).mtable.record;
@@ -1096,6 +1179,28 @@ class SsaRaNormalizer extends SsaRebuilder {
 				}
 				// break
 			}
+			ENUM_QUERY => {
+				// Open-enum subtype query: emit `tagLo <= e && e <= tagHi` (or exact equality
+				// for a leaf). Enum values are integers, so no tag extraction is needed.
+				if (V3.isEnum(atn.oldType) && V3.isEnum(rtn.oldType)) {
+					var actualTag = ai_old[offset];
+					var tagType = EnumType.!(atn.oldType).enumDecl.tagType;
+					var rDecl = EnumType.!(rtn.oldType).enumDecl;
+					var check: SsaInstr;
+					if (rDecl.tagLo == rDecl.tagHi) {
+						var expected = newGraph.intConst(rDecl.tagLo);
+						check = curBlock.pure(V3Op.newIntEq(tagType), [actualTag, expected]);
+					} else {
+						var lo = newGraph.intConst(rDecl.tagLo);
+						var hi = newGraph.intConst(rDecl.tagHi);
+						var chkLo = curBlock.pure(tagType.opLtEq(), [lo, actualTag]);
+						var chkHi = curBlock.pure(tagType.opLtEq(), [actualTag, hi]);
+						check = curBlock.opBoolAnd0(chkLo, chkHi);
+					}
+					return opAnd(left, check);
+				}
+				// break
+			}
 			_ => ; // break
 		}
 		if (atn.size > 1) {
@@ -1827,6 +1932,11 @@ class SsaRaNormalizer extends SsaRebuilder {
 	}
 	private def funcRef(m: IrSpec) -> SsaInstr {
 		return newGraph.valConst(Function.funcRefType(m.getFuncType()), FuncVal.new(m));
+	}
+	// Targets where the closure receiver slot must hold a reference value (JVM,
+	// wasm-gc) — return true so enum closure capture boxes the tag to Oop.
+	private def needsBoxedEnumReceiver() -> bool {
+		return context.compiler.NormConfig.BoxEnumClosureReceiver;
 	}
 	private def nonzero(tn: TypeNorm) -> TypeNorm {
 		if (tn.size == 0) context.fail("expected at least one type");

@@ -31,6 +31,7 @@ component VstIr {
 class IrBuilder(ctype: Type, parent: IrClass) {
 	def fields = Vector<IrField>.new();
 	def methods = Vector<IrMethod>.new();
+	var module: IrModule;
 
 	new() {
 		if (parent == null) {
@@ -71,10 +72,65 @@ class IrBuilder(ctype: Type, parent: IrClass) {
 				x: VstMethod => addVstMethod(x);
 			}
 		}
+		// Per-case method overrides on enum cases. Build an IrMethod for each override and
+		// record it in the root method's enumCaseImpls array (indexed by the case's DFS
+		// tag). fillEnumMtable picks this up before falling back to the normal parent walk.
+		match (decl) {
+			edecl: VstEnum => addVstEnumCaseMethods(edecl);
+		}
 		var ic = build();
 		ic.boxing = boxing;
 		ic.packed = packed;
 		return ic;
+	}
+	def addVstEnumCaseMethods(decl: VstEnum) {
+		for (i < decl.cases.length) {
+			var vc = decl.cases[i];
+			if (vc.members == null) continue;
+			for (l = vc.members; l != null; l = l.tail) {
+				match (l.head) {
+					m: VstMethod => addEnumCaseOverride(decl, vc, m);
+					_ => ;
+				}
+			}
+		}
+	}
+	def addEnumCaseOverride(decl: VstEnum, vc: VstEnumCase, m: VstMethod) {
+		var rootMethod = m.root;
+		if (rootMethod == null || rootMethod == m) return; // verifier already errored
+		var ir = newIrMethod(m);
+		addRepHintFacts(m, ir);
+		ir.flags |= IrFlag.M_OVERRIDE;
+		addIrMethod(ir);
+		m.index = ir.index;
+		// Allocate the root method's caseImpls array on first override. Size matches the
+		// root enum's DFS tag range so subtype-case overrides also slot in correctly.
+		var root = rootMethod.root;
+		var rootEnum = VstEnum.!(root.receiver);
+		var size = rootEnum.tagHi + 1;
+		if (root.enumCaseImpls == null) root.enumCaseImpls = Array<IrMethod>.new(size);
+		if (root.enumCaseMethods == null) root.enumCaseMethods = Array<VstMethod>.new(size);
+		var tag = vc.tag;
+		if (tag >= 0 && tag < size) {
+			root.enumCaseImpls[tag] = ir;
+			root.enumCaseMethods[tag] = m;
+		}
+		// Mark the root's IrMethod as overridden so bestCallVirtual routes to virtual
+		// dispatch and the mtable builder consults caseImpls. If the root method lives on
+		// the same enum we're currently building, look it up in our local `methods` vector
+		// — calling module.makeIrClass(currentCtype) would recurse into ourselves.
+		if (rootEnum.getDeclaredType() == ctype) {
+			if (root.index >= 0 && root.index < methods.length) {
+				var rootIr = methods[root.index];
+				if (rootIr != null) rootIr.flags |= IrFlag.M_OVERRIDDEN;
+			}
+		} else if (module != null) {
+			var rootIc = module.makeIrClass(rootEnum.getDeclaredType());
+			if (rootIc != null && root.index >= 0 && root.index < rootIc.methods.length) {
+				var rootIr = rootIc.methods[root.index];
+				if (rootIr != null) rootIr.flags |= IrFlag.M_OVERRIDDEN;
+			}
+		}
 	}
 	def addVstField(f: VstField, isVariant: bool, unboxed: bool) {
 		var ir = IrField.new(ctype, f.getType());
@@ -111,11 +167,25 @@ class IrBuilder(ctype: Type, parent: IrClass) {
 		if (r == m) {
 			// this is the root method of a method family
 			addIrMethod(ir);
-		} else {
-			// this is an override
+		} else if (parent != null) {
+			// this is an override of a method on the superclass
 			parent.methods[r.index].flags |= IrFlag.M_OVERRIDDEN;
 			ir.flags |= IrFlag.M_OVERRIDE;
 			setIrMethod(r.index, ir);
+		} else {
+			// Subtype enum override of an ancestor enum's method (Stage 3.3). The subtype's
+			// IrClass keeps its own slot (no shared parent); set M_OVERRIDDEN on the root
+			// enum's IrMethod so bestCallVirtual will route to virtual dispatch, and the
+			// dispatch-table builder picks this up for the root's table.
+			ir.flags |= IrFlag.M_OVERRIDE;
+			addIrMethod(ir);
+			if (module != null && VstEnum.?(r.receiver)) {
+				var rootIc = module.makeIrClass(r.receiver.getDeclaredType());
+				if (rootIc != null && r.index < rootIc.methods.length) {
+					var rootIr = rootIc.methods[r.index];
+					if (rootIr != null) rootIr.flags |= IrFlag.M_OVERRIDDEN;
+				}
+			}
 		}
 		m.index = ir.index;
 	}

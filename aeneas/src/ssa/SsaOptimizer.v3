@@ -687,7 +687,11 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 			TypeSubsume => {
 				var xval = unop(i);
 				var ft = i.op.typeArgs[0], tt = i.op.typeArgs[1];
-				if (xconst) return graph.valConst(tt, xval);
+				// Don't const-fold primitive → Oop: backends materialize this as a boxing
+				// conversion (Integer.valueOf on JVM, i31ref on wasm-gc). Folding to a
+				// SsaConst(Oop, intVal) loses the box-needed marker and the backend can't
+				// distinguish it from a null Oop reference.
+				if (xconst && !(tt == Oop.TYPE && PrimType.?(ft))) return graph.valConst(tt, xval);
 				if (ft == tt) return x; // fold TypeSubsume<T, T>(x)
 				if (tt == x.getType()) return x; // fold TypeSubsume<F, T>(x: T)
 				match (tt.typeCon.kind) {
@@ -746,6 +750,24 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 					}
 					ENUM_TO_SET => {
 						return addEnumToSet(EnumSetType.!(tt), x);
+					}
+					ENUM_CAST => {
+						// Open-enum subtype downcast: check the receiver's tag falls in the
+						// target subtype's [tagLo, tagHi] range. Throws TypeCheck if not; the
+						// value passes through unchanged (enum values are just tag ints).
+						var tt2 = EnumType.!(tt);
+						var tagType = EnumType.!(ft).enumDecl.tagType;
+						var lo = tt2.enumDecl.tagLo, hi = tt2.enumDecl.tagHi;
+						var cmp: SsaInstr;
+						if (lo == hi) {
+							cmp = addNot(addBinop(V3Op.newIntEq(tagType), x, graph.intConst(lo)));
+						} else {
+							var chkLo = addBinop(tagType.opLtEq(), graph.intConst(lo), x);
+							var chkHi = addBinop(tagType.opLtEq(), x, graph.intConst(hi));
+							cmp = addNot(addBinop(V3Op.opBoolAnd, chkLo, chkHi));
+						}
+						addConditionalThrow(i.source, V3Exception.TypeCheck, cmp);
+						return x;
 					}
 					_ => {
 						if (x.facts.V_NON_ZERO) {
@@ -947,8 +969,10 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 				if (i.op.isPolymorphic()) return i;
 				var xval = unop(i);
 				if (xconst) {
-					// VariantGetMethod[m](#K) => (m, #K)
-					var obj = Record.!(xval);
+					// VariantGetMethod[m](#K) => (m, #K). Enum receivers are int tags; the
+					// fold below stores the raw tag — normValIntoArray boxes it for
+					// ref-receiver targets so tag 0 stays distinct from a null Oop.
+					var obj: Val = if(V3.isEnum(meth.receiver), xval, Record.!(xval));
 					var val = if(!meth.member.flags.M_UNREACHABLE, Closure.new(obj, meth));
 					return graph.valConst(meth.getBoundType(), val);
 				}
@@ -960,7 +984,7 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 				if (dv != null) {
 					var xval = unop(i);
 					if (xconst && !i.op.isPolymorphic()) {  // VariantGetVirtual[m](K) => (m, K)
-						var obj = Record.!(xval);
+						var obj: Val = if(V3.isEnum(dv.receiver), xval, Record.!(xval));
 						var val = if(!dv.member.flags.M_UNREACHABLE, Closure.new(obj, dv));
 						return graph.valConst(dv.getBoundType(), val);
 					}
@@ -1195,6 +1219,15 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 	}
 	def tryEval(apply: SsaApplyOp) -> SsaInstr {
 		for (i in apply.inputs) if (!SsaConst.?(i.dest)) return null; // only evaluate if all inputs are constants
+		// Don't fold TypeSubsume<P, Oop> for primitive P: the interpreter treats this as
+		// a no-op (SUBSUME), but the resulting SsaConst(Oop, intVal) would skip the
+		// backend's boxing materialization (Integer.valueOf on JVM, ref.i31 on wasm-gc),
+		// producing genLoadConst failures.
+		if (apply.op.opcode == Opcode.TypeSubsume
+		    && apply.op.typeArgs[1] == Oop.TYPE
+		    && PrimType.?(apply.op.typeArgs[0])) {
+			return null;
+		}
 		if (foldingArgs == null) foldingArgs = FoldingArguments.new(context.prog);
 		if (apply.inputs.length != apply.op.sig.paramTypes.length) {
 			// XXX: attempt normalization first.
@@ -1281,6 +1314,12 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 		if (ft == tt) return null;
 		if (FuncType.?(ft) || FuncType.?(tt)) return V3Op.newTypeSubsume(ft, tt);
 		if (TupleType.?(ft) || TupleType.?(tt)) return V3Op.newTypeSubsume(ft, tt);
+		// Enum closure dispatch: when a CallFunction/CallClosure fold rewrites to a
+		// direct CallMethod, the closure ABI's Oop receiver slot may need to be
+		// unboxed back to the enum's tag type (or vice versa). JvmGen/WasmCodeGen
+		// already handle TypeSubsume<Oop, prim> / <prim, Oop>.
+		if (ft == Oop.TYPE && PrimType.?(tt)) return V3Op.newTypeSubsume(ft, tt);
+		if (tt == Oop.TYPE && PrimType.?(ft)) return V3Op.newTypeSubsume(ft, tt);
 		return null;
 	}
 	def copyInputs(i: SsaInstr, prepend: SsaInstr, start: int) -> Array<SsaInstr> {
@@ -1461,21 +1500,120 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 		// Try to constant-fold.
 		var r = asRecord(x);
 		if (r != null) 	return context.prog.ir.resolveMethodImpl(r.rtype, m); // devirtualize K
+		// Constant enum receiver: the integer constant IS the runtime tag. Resolve the
+		// specific impl that the mtable would pick for that tag (per-case override first,
+		// then the deepest enum in the hierarchy whose tag range covers it).
+		if (V3.isEnum(x.getType()) && SsaConst.?(x)) {
+			var ret = devirtualizeEnumConst(m, x);
+			if (ret != null) return ret;
+		}
 		// Pattern-match allocations.
 		if (optag == Opcode.ClassAlloc.tag || optag == Opcode.VariantAlloc.tag) {
 			return context.prog.ir.resolveMethodImpl(SsaApplyOp.!(x).op.typeArgs[0], m); // devirtualize {Class,Variant}Alloc
 		}
 		// Try resolving on the (potentially more precise) static type of the receiver.
 		var xt = x.getType();
+		// Enum subtype receiver: walk the VstEnum hierarchy. The root's IrClass doesn't
+		// share slot layout with subtype IrClasses, so resolveMethodImpl can't help here;
+		// we instead bind to the deepest enum in the receiver's tag range whose impl is
+		// uniform across that range.
+		if (V3.isEnum(xt) && xt != m.receiver) return devirtualizeEnumSubtype(m, xt);
 		if (TypeSystem.isSubtype(xt, m.receiver)) {
 			var xm = context.prog.ir.resolveMethodImpl(xt, m);
 			if (!xm.member.flags.M_OVERRIDDEN) return xm;
 		}
 		return null;
 	}
+	// Constant enum receiver: SsaConst's value is the tag (int boxed). Pick the same
+	// impl the runtime mtable would for that tag — per-case override first, then the
+	// deepest enum whose tag range covers it.
+	def devirtualizeEnumConst(m: IrSpec, x: SsaInstr) -> IrSpec {
+		if (!IrMethod.?(m.member)) return null;
+		var tag = V3.unboxI32(SsaConst.!(x).val);
+		var name = IrMethod.!(m.member).source.name();
+		var rootDecl = EnumType.!(m.receiver).enumDecl;
+		// Per-case override on the root method wins.
+		var rootMethod = findRootMethodDecl(rootDecl, name);
+		if (rootMethod != null && rootMethod.enumCaseImpls != null
+		    && tag >= 0 && tag < rootMethod.enumCaseImpls.length) {
+			var perCase = rootMethod.enumCaseImpls[tag];
+			if (perCase != null) {
+				return IrSpec.new(perCase.receiver, Arrays.replace(m.typeArgs, 0, perCase.receiver), perCase);
+			}
+		}
+		// Otherwise: walk from the root down to the deepest enum whose tag range covers
+		// `tag` and has its own subtype-level method override.
+		var cur = rootDecl;
+		var bestImpl: IrMethod;
+		var bestReceiver: Type = m.receiver;
+		while (cur != null) {
+			var impl = enumOverrideImpl(cur, name);
+			if (impl != null) { bestImpl = impl; bestReceiver = cur.getDeclaredType(); }
+			var next: VstEnum;
+			for (l = cur.subtypeOrder; l != null; l = l.tail) {
+				if (l.head.tagLo <= tag && tag <= l.head.tagHi) { next = l.head; break; }
+			}
+			cur = next;
+		}
+		if (bestImpl == null) return null;
+		return IrSpec.new(bestReceiver, Arrays.replace(m.typeArgs, 0, bestReceiver), bestImpl);
+	}
+	def devirtualizeEnumSubtype(m: IrSpec, xt: Type) -> IrSpec {
+		if (!IrMethod.?(m.member)) return null;
+		var subtypeDecl = EnumType.!(xt).enumDecl;
+		var name = IrMethod.!(m.member).source.name();
+		// If any strict descendant has a subtype-level OR per-case override, dispatch is
+		// non-uniform across xt's tag range; the runtime mtable must resolve it.
+		if (hasEnumDescendantOverride(subtypeDecl, name)) return null;
+		// Also block if any per-case override on the root method falls in xt's range.
+		var rootDecl = EnumType.!(m.receiver).enumDecl;
+		var rootMethod = findRootMethodDecl(rootDecl, name);
+		if (rootMethod != null && rootMethod.enumCaseImpls != null) {
+			var impls = rootMethod.enumCaseImpls;
+			var lo = subtypeDecl.tagLo, hi = subtypeDecl.tagHi;
+			for (t = lo; t <= hi; t++) {
+				if (t < impls.length && impls[t] != null) return null;
+			}
+		}
+		// Walk up (inclusive) to the nearest ancestor with an override; that's the uniform impl.
+		var cur = subtypeDecl;
+		while (cur != null) {
+			var impl = enumOverrideImpl(cur, name);
+			if (impl != null) {
+				var implReceiver = cur.getDeclaredType();
+				return IrSpec.new(implReceiver, Arrays.replace(m.typeArgs, 0, implReceiver), impl);
+			}
+			cur = cur.parentEnum;
+		}
+		return null;
+	}
+	def findRootMethodDecl(rootDecl: VstEnum, name: string) -> VstMethod {
+		if (rootDecl.memberMap == null) return null;
+		var member = rootDecl.memberMap[name];
+		if (!VstMethod.?(member)) return null;
+		return VstMethod.!(member).root;
+	}
+	def enumOverrideImpl(decl: VstEnum, name: string) -> IrMethod {
+		if (decl.memberMap == null) return null;
+		var member = decl.memberMap[name];
+		if (!VstMethod.?(member)) return null;
+		var vm = VstMethod.!(member);
+		var ic = context.prog.ir.makeIrClass(decl.getDeclaredType());
+		if (ic == null || vm.index < 0 || vm.index >= ic.methods.length) return null;
+		return ic.methods[vm.index];
+	}
+	def hasEnumDescendantOverride(decl: VstEnum, name: string) -> bool {
+		for (l = decl.subtypeOrder; l != null; l = l.tail) {
+			if (enumOverrideImpl(l.head, name) != null) return true;
+			if (hasEnumDescendantOverride(l.head, name)) return true;
+		}
+		return false;
+	}
 
 	def asRecord(i: SsaInstr) -> Record {
-		return if(SsaConst.?(i), Record.!(SsaConst.!(i).val));
+		if (!SsaConst.?(i)) return null;
+		var v = SsaConst.!(i).val;
+		return if(Record.?(v), Record.!(v));
 	}
 	def getFieldType(op: Operator, field: IrField) -> Type {
 		return if(op.isPolymorphic(), V3Op.extractIrSpec(op, field).getFieldType(), field.fieldType);

@@ -33,6 +33,15 @@ class Box<T>(val: T) extends Val {
 		return 0;
 	}
 }
+// Phase 7: marker for a primitive value that has been boxed into the Oop slot for
+// closure-receiver-as-reference targets (JVM, wasm-gc). The wrapped int is the enum's
+// tag; backends emit Integer.valueOf / ref.i31 instead of a null Oop reference.
+class OopInt(v: int) extends Val {
+	def equals(other: Val) -> bool {
+		return OopInt.?(other) && OopInt.!(other).v == v;
+	}
+	def hash() -> int { return v; }
+}
 // The source position in a method, such as for an exception stacktrace.
 class Source(mdecl: VstMethod, line: int, column: int, tail: Source, range: FileRange) {
 	def render(buf: StringBuilder) -> StringBuilder {

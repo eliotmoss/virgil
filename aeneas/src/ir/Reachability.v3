@@ -48,6 +48,11 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 	var defaultValues: HashMap<Type, Val>;
 	var liveMethods = Vector<RaMethod>.new();
 	var normalizer: ReachabilityNormalizer;
+	// Per-root enum: which DFS tags appear as concrete values (SsaConst, ArrayAlloc
+	// default, etc.) anywhere in the reachable program. Consumed by
+	// ReachabilityNormalizer.compactEnumMtables to gate the slot-count threshold on
+	// live tags rather than all tags. Absent root → all tags conservatively live.
+	def liveEnumTags = TypeUtil.newTypeMap<Array<bool>>();
 
 	// perform the analysis, starting from the roots
 	def analyze() {
@@ -266,6 +271,7 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 			if (rm.orig.flags.M_EQUALS) return; // don't analyze equality methods
 			graph = compilation.genSsa(rm.getSpec(), 0);
 		}
+		analyzeLiveEnumTags(graph);
 		if (rm.spec != null) {
 			// analyze a polymorphic method
 			var polyOps = polyMap[rm.orig];
@@ -286,6 +292,42 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 				}
 			}
 		}
+	}
+	// Walk the graph's constants + array/struct allocations to record which enum tags
+	// are concretely produced anywhere in the program.
+	def analyzeLiveEnumTags(graph: SsaGraph) {
+		if (graph.values != null) {
+			for (v in graph.values) {
+				if (v == null) continue;
+				if (EnumType.?(v.vtype)) markEnumTagLive(EnumType.!(v.vtype), V3.unboxI32(v.val));
+			}
+		}
+		for (b in graph.bfBlocks(null)) {
+			for (i = b.next; i != b; i = i.next) {
+				if (!SsaApplyOp.?(i)) continue;
+				var apply = SsaApplyOp.!(i);
+				match (apply.op.opcode) {
+					ArrayAlloc => {
+						// Array<E>.new(n) zero-inits elements; tag 0 reaches dispatch.
+						var elemType = apply.op.typeArgs[0].nested.head;
+						if (EnumType.?(elemType)) markEnumTagLive(EnumType.!(elemType), 0);
+					}
+					_ => ;
+				}
+			}
+		}
+	}
+	def markEnumTagLive(et: EnumType, tag: int) {
+		var decl = et.enumDecl;
+		// Subtype enum constants still belong to the root's tag space.
+		while (decl.parentEnum != null) decl = decl.parentEnum;
+		var rootType = decl.getDeclaredType();
+		var arr = liveEnumTags[rootType];
+		if (arr == null) {
+			arr = Array<bool>.new(decl.tagHi + 1);
+			liveEnumTags[rootType] = arr;
+		}
+		if (tag >= 0 && tag < arr.length) arr[tag] = true;
 	}
 	// analyze the values in a graph
 	def analyzeValues(graph: SsaGraph) {
@@ -527,8 +569,55 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 		if (rm.isVirtual()) return;
 		rm.virtual = RaVirtual.new(rm);
 		var rc = makeClass(rm.receiver);
+		if (V3.isEnum(rm.receiver)) {
+			// Open-enum virtual: mark every subtype override of this method reachable.
+			markEnumVirtualImpls(EnumType.!(rm.receiver).enumDecl, rm);
+			return;
+		}
 		for (l = rc.subtypes; l != null; l = l.tail) {
 			analyzeVirtual(l.head, rm);
+		}
+	}
+	// Walk the enum hierarchy from the root; for each subtype that overrides `rm`'s method
+	// by name, force the corresponding IrMethod to be marked reachable so the dispatch
+	// table built in layoutEnumMtable references live methods.
+	def markEnumVirtualImpls(rootDecl: VstEnum, rm: RaMethod) {
+		if (!IrMethod.?(rm.orig)) return;
+		var name = IrMethod.!(rm.orig).source.name();
+		markEnumVirtualImplsRec(rootDecl, name);
+	}
+	def markEnumVirtualImplsRec(decl: VstEnum, name: string) {
+		if (decl.memberMap != null) {
+			var member = decl.memberMap[name];
+			if (VstMethod.?(member)) {
+				var vm = VstMethod.!(member);
+				var ic = oldIr.makeIrClass(decl.getDeclaredType());
+				if (ic != null && vm.index >= 0 && vm.index < ic.methods.length) {
+					var subImpl = ic.methods[vm.index];
+					if (subImpl != null) {
+						var ta: Array<Type> = [decl.getDeclaredType()];
+						var spec = IrSpec.new(decl.getDeclaredType(), ta, subImpl);
+						var impl = makeMethod(ta, subImpl, null);
+						getMethod(null, impl);
+					}
+				}
+				// Per-case overrides on this enum's cases (root or subtype).
+				if (vm.root.enumCaseImpls != null) {
+					var impls = vm.root.enumCaseImpls;
+					for (t < impls.length) {
+						var ci = impls[t];
+						if (ci == null) continue;
+						var ta: Array<Type> = [ci.receiver];
+						var perCase = makeMethod(ta, ci, null);
+						getMethod(null, perCase);
+					}
+				}
+			}
+		}
+		if (decl.subtypeOrder != null) {
+			for (l = decl.subtypeOrder; l != null; l = l.tail) {
+				markEnumVirtualImplsRec(l.head, name);
+			}
 		}
 	}
 	def getMethod(op: SsaApplyOp, rm: RaMethod) {
@@ -730,6 +819,12 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 				var ic = oldIr.makeIrClass(t);
 				if (ic == null) ic = IrClass.new(t, null, null, [], []);
 				raType = newRaClass(t, ic, parent);
+			}
+			ENUM => {
+				// Enum methods dispatch on the integer tag; create a RaClass so makeMethod/findMethod work.
+				var ic = oldIr.makeIrClass(t);
+				if (ic == null) ic = IrClass.new(t, null, null, [], []);
+				raType = newRaClass(t, ic, null);
 			}
 			_ => {
 				for (l = t.nested; l != null; l = l.tail) makeType(l.head);

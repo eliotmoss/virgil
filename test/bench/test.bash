@@ -2,6 +2,11 @@
 
 . ../common.bash bench
 
+# EnumClosureBoxing exercises open-enum hierarchies; gate the whole bench
+# suite behind -open-types so it parses. No-op for benchmarks that don't use
+# the feature.
+export V3C_OPTS="$V3C_OPTS -open-types"
+
 # Test that each of the benchmarks actually compiles
 cd ../../bench
 

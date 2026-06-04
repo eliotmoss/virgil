@@ -194,8 +194,39 @@ class VstComponent extends VstCompound {
 // Parsed "enum X { ... }"
 class VstEnum extends VstCompound {
 	def cases: Array<VstEnumCase>;
-	def tagType = V3.getTagType(cases.length);
+	var tagType = V3.getTagType(cases.length);	// resized by verifier Pass B once DFS tag count is known
+	// Open-enum hierarchy state. All null/zero/false for a closed enum.
+	var qualifiers: List<Token>;			// dot-prefix path, e.g. [E] for `enum E.More`
+	var qualifierTypeArgs: List<VstList<TypeRef>>;	// parallel to qualifiers; enums have no generics today
+	var parentEnum: VstEnum;			// immediate parent; null for root
+	var rootEnum: VstEnum;				// quick root pointer; `this` for root
+	var subtypes: HashMap<string, VstEnum>;		// direct subtypes (filled by verifier Pass A)
+	var subtypeOrder: List<VstEnum>;		// subtypes in reverse declaration order
+	var tagLo: int = -1;				// first DFS tag in this subtree (= variantTag for leaves)
+	var tagHi: int = -1;				// inclusive upper bound of DFS tag range
+	var hasDefault: bool;				// true iff this level declares user-written `case _`
+	var defaultCase: VstEnumCase;			// the user-written `case _`, if any
+	var extraParams: VstList<ParamDecl>;		// subtype-only fields (Stage 4+5)
+	var effectiveParams: List<ParamDecl>;		// resolved root + ancestor extras + own extras (set by Pass E)
+	var hasSuperKeyword: bool;			// subtype declared params with `super` (or omitted clause)
+	var extraParamsList: List<ParamDecl>;		// parser-time: params after `super` in (super, x, y)
+	var enumMethods: Array<VstMethod>;		// per-level method override table, indexed by root method index
+	var casesAll: Array<VstEnumCase>;		// DFS-order array including subtype cases (built by verifier)
 
+	// VstCompound.buildMembers walks getParams() to create the synthetic VstFields for
+	// each declared parameter. For a subtype enum the inherited ancestor params already
+	// live on the root's IrClass — so only the subtype's own extras get fresh fields.
+	def getParams() -> List<ParamDecl> {
+		if (qualifiers != null) {
+			// Subtype: super/implicit form uses parser-time extras list. Explicit form
+			// (re)states the full param list; treat them all as own params here —
+			// verifyEnumParams will later split inherited prefix from real extras and
+			// validate the prefix matches the parent.
+			if (hasSuperKeyword) return extraParamsList;
+			return if(params != null, params.list);
+		}
+		return if(params != null, params.list);
+	}
 	new(isPrivate: bool, name: Token, params: VstList<ParamDecl>, cases, members: List<VstMember>)
 		super(isPrivate, name, null, params, null, members) {
 		// XXX: move type creation somewhere else?
@@ -235,8 +266,11 @@ class VstPacking extends VstCompound {
 
 // Member of an enum.
 class VstEnumCase extends VstMember {
-	def tag: int;
+	var tag: int;					// LOCAL tag at parse time; replaced by global DFS tag in Pass B
 	def args: VstList<Expr>;
+	var parentEnum: VstEnum;			// enum that lexically owns this case
+	var tagHi: int = -1;				// equals tag for leaves; for `case _` covers its parent's subtype range
+	var members: List<VstMember>;			// per-case method overrides, parsed from `case A { def m() ... }`
 	new(tag, name: Token, args) super(false, name) { }
 	def getType() -> Type {
 		return receiver.getDeclaredType();
@@ -402,6 +436,14 @@ class VstMethod extends VstMember {
 	var typeEnv: TypeEnv;
 	var root: VstMethod;
 	var importName: Token;
+	// Per-case override IrMethods, indexed by the case's DFS tag. Lives on the root
+	// enum method only; null entries mean "use the default impl picked by
+	// fillEnumMtable's normal walk". Populated by VstIr.buildClass for enum methods.
+	var enumCaseImpls: Array<IrMethod>;
+	// Per-case override VstMethod for each tag, parallel to enumCaseImpls. Used by
+	// the verifier to find which root method a case-level override is overriding and
+	// by MethodEnv for static-dispatch lookups (E.A.m()).
+	var enumCaseMethods: Array<VstMethod>;
 
 	new(isPrivate: bool, name: Token, typeParams, func) super(isPrivate, name) { }
 
@@ -737,6 +779,8 @@ class MatchPattern(expr: Expr, params: VstList<VarDecl>) {
 	var variantCase: VstCaseMember;  // if this is a match on a variant case
 	var vdecl: VarDecl; // if this is a type case (including variant subtype patterns)
 	var val: Val;
+	var tagLo: int = -1;	// for open-enum subtype-arm range patterns; -1 means not a range
+	var tagHi: int = -1;	// inclusive high end of the range
 	def decl() -> VstClass { return variantCase.decl; }
 }
 // continue;

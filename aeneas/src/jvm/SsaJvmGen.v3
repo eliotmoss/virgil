@@ -445,7 +445,12 @@ class SsaJvmGen(jprog: JvmProgram, context: SsaContext, jsig: JvmSig, code: JvmC
 			TypeQuery =>		emitTypeQuery(op.typeArgs[0], op.typeArgs[1]);
 			TypeSubsume => {
 				var implicitType = op.typeArgs[1];
-				if (V3.isFunction(implicitType)) {
+				if (implicitType == Oop.TYPE && PrimType.?(op.typeArgs[0])) {
+					code.invokestatic(JvmTypes.java_lang_Integer.name, "valueOf", JvmTypes.SIG_INT_INTEGER);
+				} else if (op.typeArgs[0] == Oop.TYPE && PrimType.?(implicitType)) {
+					code.checkcast(JvmTypes.java_lang_Integer);
+					code.invokevirtual(JvmTypes.java_lang_Integer.name, "intValue", JvmTypes.SIG_VOID_INT);
+				} else if (V3.isFunction(implicitType)) {
 					var exactType = op.typeArgs[0];
 					if (exactType == Oop.TYPE || exactType.typeCon.kind == Kind.ANYFUNC) {  // a cast inserted from overflow params.
 						code.checkcast(jprog.jvmType(implicitType));
@@ -679,6 +684,17 @@ class SsaJvmGen(jprog: JvmProgram, context: SsaContext, jsig: JvmSig, code: JvmC
 		if (methodRef.isNew()) {
 			var nsig = jprog.makeJvmSig(jclass, methodRef.getMethodType(), jclass);
 			code.invokestatic(jclass.name, "$init", nsig);
+		} else if (V3.isEnum(methodRef.receiver)) {
+			// Enum methods are static methods on the synthetic V3E_<name> class; the receiver
+			// tag is passed as the first parameter. mangleEnumMethod disambiguates the name
+			// for per-case / subtype overrides that share the root's source name.
+			var recvRep = jprog.jrep.getRep(methodRef.receiver);
+			var retType = jprog.jrep.getRep(Function.getReturnType(methodRef.getMethodType()));
+			var nsig = jprog.makeJvmSig(recvRep, methodRef.getMethodType(), retType);
+			var mname = if(IrMethod.?(methodRef.member),
+				jprog.mangleEnumMethod(IrMethod.!(methodRef.member)),
+				V3.mangleIrMember(methodRef.member));
+			code.invokestatic(jclass.name, mname, nsig);
 		} else if (V3.isComponent(methodRef.receiver)) {
 			var nsig = jprog.jvmSig(methodRef.getMethodType());
 			code.invokestatic(jclass.name, V3.mangleIrMember(methodRef.member), nsig);

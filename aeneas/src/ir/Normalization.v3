@@ -17,6 +17,12 @@ class NormalizerConfig {
 	var UsedScalars: Scalar.set = Scalar.B32 | Scalar.B64 | Scalar.F32 | Scalar.F64 | Scalar.Ref;
 	var WrapFuncTypeSubsume: bool;
 	var ExplicitRefTypeCast: bool;
+	// True on targets whose closure receiver slot is a real reference type and
+	// where null is distinct from a primitive zero — JVM (Object) and wasm-gc
+	// (eqref). On these targets an enum tag captured as a closure receiver must
+	// be boxed (Integer.valueOf / ref.i31) so tag 0 doesn't collapse onto a
+	// null reference. v3i and wasm linear leave the tag as a raw int.
+	var BoxEnumClosureReceiver: bool;
 
 	var GetScalar: (Compiler, Program, Type) -> Scalar.set = defaultGetScalar;
 	var GetBitWidth: Type -> byte = defaultGetBitWidth;
@@ -75,6 +81,7 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 		}
 		ra.classes.apply(layoutVtable);
 		Lists.apply(virtuals, layoutMtable);
+		if (ra.compiler.CompactMtableThreshold > 0) compactEnumMtables();
 
 		if (wrappers != null) wrappers.createVirtualWrappers(this);
 
@@ -571,6 +578,15 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 			rm.norm.flags |= IrFlag.M_ABSTRACT | IrFlag.M_UNREACHABLE;
 			if (!rm.isVirtual()) return; // not live, not virtual
 		}
+		// Carry M_OVERRIDE / M_OVERRIDDEN forward from the pre-norm IrMethod for enum
+		// methods, so JVM mangleEnumMethod can disambiguate per-case / subtype overrides
+		// that share the root's source name. Class/variant methods set these flags
+		// further down the function (when the parent method is found), so a blanket
+		// transfer would mis-flag siblings as overrides.
+		if (V3.isEnum(rm.receiver)) {
+			if (m.flags.M_OVERRIDE) rm.norm.flags |= IrFlag.M_OVERRIDE;
+			if (m.flags.M_OVERRIDDEN) rm.norm.flags |= IrFlag.M_OVERRIDDEN;
+		}
 		if (m.flags.M_NEW) {
 			// constructors always end up at slot 0
 			rm.norm.flags |= IrFlag.M_NEW;
@@ -592,7 +608,9 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 	}
 	def layoutMtable(rv: RaVirtual) {
 		if (rv.mtable != null) return;
-		var rm = rv.raMethod, rc = ra.getClass(rm.receiver);
+		var rm = rv.raMethod;
+		if (V3.isEnum(rm.receiver)) return layoutEnumMtable(rv);
+		var rc = ra.getClass(rm.receiver);
 		var size = rc.maxClassId - rc.minClassId;
 		if (ra.compiler.RaDevirtualize && size == 1) return; // no need for an mtable
 		var table = Array<IrMethod>.new(size), mtable = IrMtable.new(rm.norm, rc.minClassId, table);
@@ -629,6 +647,181 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 		for (l = rc.children; l != null; l = l.tail) {
 			setMtable(l.head, rv);
 		}
+	}
+	// Build a dispatch mtable for an open-enum virtual method. The table is indexed by the
+	// receiver's integer tag (rootId = 0); each slot is the IrMethod to call for that tag.
+	// Walks the VstEnum hierarchy DFS: children (which may override) fill first, then this
+	// node fills any remaining tags in its range with its own impl (or the inherited one).
+	def layoutEnumMtable(rv: RaVirtual) {
+		var rm = rv.raMethod;
+		var rootDecl = EnumType.!(rm.receiver).enumDecl;
+		if (rootDecl.qualifiers != null) return;	// only build on the root
+		var size = rootDecl.tagHi + 1;
+		if (size <= 0) return;
+		var rootImpl = rm.norm;
+		// Mark M_OVERRIDDEN on the normalized root method so extractVirtualRef does not
+		// devirtualize back to a direct call.
+		rootImpl.flags |= IrFlag.M_OVERRIDDEN;
+		var table = Array<IrMethod>.new(size);
+		var mtable = IrMtable.new(rootImpl, 0, table);
+		rv.mtable = mtable;
+		// Pick the mtable element type to match the call-site dispatch convention used by
+		// SsaNormalizer.CallVariantVirtual for enums. On native (NonRefClosureReceiver=true
+		// and no explicit ref cast), the call uses CallFunctionDirect with the tag as a
+		// scalar argument, so the funcref signature must include the receiver. On JVM and
+		// wasm-gc, the call uses CallFunction (Oop receiver = boxed tag), so the funcref
+		// signature carries only the user params — Oop gets prepended at the op level.
+		var methType = rootImpl.getMethodType();
+		if (ra.compiler.NormConfig.NonRefClosureReceiver
+		    && !ra.compiler.NormConfig.ExplicitRefTypeCast) {
+			methType = Function.prependParamType(rootImpl.receiver, methType);
+		}
+		var ft = Function.funcRefType(methType);
+		mtable.record = ra.prog.newRecord(V3Array.newType(ft), size);
+		var methodName = rm.orig.source.name();
+		// Find the root method once (it lives on the root enum since rootDecl.qualifiers
+		// is null) and thread it through the recursion so per-case overrides declared on
+		// subtype cases still get picked up when the subtype doesn't itself redeclare m.
+		var rootMethod: VstMethod;
+		if (rootDecl.memberMap != null) {
+			var member = rootDecl.memberMap[methodName];
+			if (VstMethod.?(member)) rootMethod = VstMethod.!(member).root;
+		}
+		fillEnumMtable(rootDecl, methodName, rootImpl, rootMethod, rm.receiver, table, mtable.record);
+	}
+	def fillEnumMtable(decl: VstEnum, methodName: string, parentImpl: IrMethod,
+			   rootMethod: VstMethod, rootType: Type,
+			   table: Array<IrMethod>, record: Record) {
+		var impl = parentImpl;
+		if (decl.memberMap != null) {
+			var member = decl.memberMap[methodName];
+			if (VstMethod.?(member)) {
+				var vm = VstMethod.!(member);
+				var ic = ra.oldIr.makeIrClass(decl.getDeclaredType());
+				if (ic != null && vm.index >= 0 && vm.index < ic.methods.length) {
+					var subImpl = ic.methods[vm.index];
+					if (subImpl != null) impl = subImpl;
+				}
+			}
+		}
+		// Recurse first; subtypes' overrides fill their own tag ranges.
+		if (decl.subtypeOrder != null) {
+			for (l = decl.subtypeOrder; l != null; l = l.tail) {
+				fillEnumMtable(l.head, methodName, impl, rootMethod, rootType, table, record);
+			}
+		}
+		// Fill any remaining tags in our range. Per-case overrides on the root method's
+		// enumCaseImpls take priority at their specific tag; everything else gets the
+		// (sub)tree default impl. Resolve to the normalized IrMethod via normEnumImpl —
+		// the pre-norm IrMethod from oldIr never receives machIndex / code-address.
+		var caseImpls: Array<IrMethod>;
+		if (rootMethod != null) caseImpls = rootMethod.enumCaseImpls;
+		for (t = decl.tagLo; t <= decl.tagHi; t++) {
+			if (table[t] == null) {
+				var perCase: IrMethod;
+				if (caseImpls != null && t < caseImpls.length) perCase = caseImpls[t];
+				var slotImpl = if(perCase != null, perCase, impl);
+				var implNorm = normEnumImpl(slotImpl);
+				table[t] = implNorm;
+				var implReceiver = implNorm.receiver;
+				var spec = IrSpec.new(implReceiver, [implReceiver], implNorm);
+				record.values[t] = FuncVal.new(spec);
+			}
+		}
+	}
+	// Compact enum mtables under -compact-mtable=N. Groups RaVirtuals by enum root and,
+	// for each root, builds per-tag tuples of (impl_method0, impl_method1, ...) across all
+	// virtual methods on that root. Deduplicates tuples to produce a small set of distinct
+	// dispatch shapes. If numSlots/numTags falls within the threshold percentage, replaces
+	// each per-method numTags-sized record with a numSlots-sized one and builds a shared
+	// slotMap (tag -> slot) record. The dispatch becomes:
+	//   slot = slotMap[tag]; impl = compactRecord[slot]; call impl(...)
+	private def compactEnumMtables() {
+		var threshold = ra.compiler.CompactMtableThreshold;
+		// Group RaVirtuals by enum root receiver type.
+		var enumRoots = Vector<Type>.new();
+		var enumVirts = Vector<Vector<RaVirtual>>.new();
+		for (l = virtuals; l != null; l = l.tail) {
+			var rv = l.head;
+			if (rv.mtable == null || rv.mtable.record == null) continue;
+			if (!V3.isEnum(rv.raMethod.receiver)) continue;
+			var rec = rv.raMethod.receiver;
+			var found = -1;
+			for (i < enumRoots.length) {
+				if (enumRoots[i] == rec) { found = i; break; }
+			}
+			if (found < 0) {
+				found = enumRoots.length;
+				enumRoots.put(rec);
+				enumVirts.put(Vector<RaVirtual>.new());
+			}
+			enumVirts[found].put(rv);
+		}
+		for (i < enumRoots.length) {
+			compactOneEnumMtable(enumRoots[i], enumVirts[i], threshold);
+		}
+	}
+	private def compactOneEnumMtable(rootType: Type, rvs: Vector<RaVirtual>, threshold: int) {
+		var rootDecl = EnumType.!(rootType).enumDecl;
+		var numTags = rootDecl.tagHi + 1;
+		if (numTags <= 0) return;
+		var numMethods = rvs.length;
+		if (numMethods == 0) return;
+		// Look up per-root live-tag tracking from reachability. If absent (no enum
+		// constants observed for this root), treat all tags as live conservatively.
+		var liveTags = ra.liveEnumTags[rootType];
+		var numLive = 0;
+		if (liveTags == null) numLive = numTags;
+		else for (tag < numTags) if (liveTags[tag]) numLive++;
+		if (numLive == 0) return;
+		// Build per-tag tuples for live tags only; dead tags map to slot 0 (any valid
+		// slot — they're unreachable at runtime so the dispatch never sees them).
+		var knownTuples = Vector<Array<IrMethod>>.new();
+		var tagToSlot = Array<int>.new(numTags);
+		for (tag < numTags) {
+			if (liveTags != null && !liveTags[tag]) continue;
+			var tuple = Array<IrMethod>.new(numMethods);
+			for (m < numMethods) tuple[m] = rvs[m].mtable.table[tag];
+			var slot = -1;
+			for (k < knownTuples.length) {
+				if (Arrays.equal(tuple, knownTuples[k])) { slot = k; break; }
+			}
+			if (slot < 0) {
+				slot = knownTuples.length;
+				knownTuples.put(tuple);
+			}
+			tagToSlot[tag] = slot;
+		}
+		var numSlots = knownTuples.length;
+		// Only compact if the slot-to-live-tag percentage falls within threshold.
+		if (numSlots * 100 > threshold * numLive) return;
+		// Shared slotMap (tag -> slot). u8 for ≤256 slots, u16 otherwise.
+		var slotType = if(numSlots <= 256, Int.getType(false, 8), Int.getType(false, 16));
+		var slotArrayType = V3Array.newType(slotType);
+		var slotMapRecord = ra.prog.newRecord(slotArrayType, numTags);
+		for (tag < numTags) slotMapRecord.values[tag] = Int.box(tagToSlot[tag]);
+		// Per-method compact dispatch record (numSlots entries).
+		for (m < numMethods) {
+			var rv = rvs[m];
+			var origRecord = rv.mtable.record;
+			var compactRec = ra.prog.newRecord(origRecord.rtype, numSlots);
+			// Find one representative live tag per slot and copy its FuncVal.
+			for (tag < numTags) {
+				if (liveTags != null && !liveTags[tag]) continue;
+				var s = tagToSlot[tag];
+				if (compactRec.values[s] == null) compactRec.values[s] = origRecord.values[tag];
+			}
+			rv.mtable.compactRecord = compactRec;
+			rv.mtable.compactSlotMap = slotMapRecord;
+			rv.mtable.compactSlotType = slotType;
+		}
+	}
+	// Resolve an enum-method old IrMethod to its normalized IrMethod via RA's makeMethod
+	// (which de-duplicates against an existing RaMethod if one was already created).
+	def normEnumImpl(old: IrMethod) -> IrMethod {
+		var ta: Array<Type> = [old.receiver];
+		var rm = ra.makeMethod(ta, old, null);
+		return rm.norm;
 	}
 	def resolveMethodImpl(rc: RaClass, rm: RaMethod) -> RaMethod {
 		var sm: RaMethod;
@@ -668,7 +861,14 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 							 tn.render, x.memberRef.asMethod().render, V3.render(fval)).outln();
 				}
 				array[index] = fval;
-				normValIntoArray(x.val, norm(x.memberRef.receiver), array, index + 1);
+				// Enum closure capture: receiver is the int tag. On ref-receiver targets
+				// (JVM, wasm-gc) wrap in OopInt so the heap emit keeps tag 0 distinct from
+				// a literal null Oop. Native/wasm linear pass the tag through unchanged.
+				var rval = x.val;
+				if (V3.isEnum(x.memberRef.receiver) && config.BoxEnumClosureReceiver) {
+					rval = OopInt.new(V3.unboxI32(rval));
+				}
+				normValIntoArray(rval, norm(x.memberRef.receiver), array, index + 1);
 			}
 			x: BoxVal => {
 				// tuple: recursively normalize all of the sub

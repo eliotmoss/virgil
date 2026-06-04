@@ -647,6 +647,10 @@ class SsaBuilder {
 					return opTypeCast(ft, tt, x);
 				}
 			}
+			ENUM => {
+				// Open-enum subtype upcast (E.More -> E): no representation change.
+				if (V3.isEnum(ft)) return x;
+			}
 			TUPLE => {
 				return opTypeCast(ft, tt, x);
 			}
@@ -664,7 +668,9 @@ class SsaBuilder {
 			}
 			_ => ;
 		}
-		if (SsaConst.?(x)) return graph.valConst(tt, SsaConst.!(x).val); // fold TypeSubsume(K)
+		// Don't const-fold primitive → Oop here: backends materialize this as a boxing
+		// conversion (Integer.valueOf on JVM, i31ref on wasm-gc). Folding loses the marker.
+		if (SsaConst.?(x) && !(tt == Oop.TYPE && PrimType.?(ft))) return graph.valConst(tt, SsaConst.!(x).val);
  		return add1(V3Op.newTypeSubsume(ft, tt), x, x.facts & Facts.V_FACTS);
 	}
 	// ConditionalThrow(exception, cond)

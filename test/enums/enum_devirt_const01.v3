@@ -1,0 +1,20 @@
+//@execute 0=33; 1=11
+// Constant enum receiver picks the deepest enum's subtype-level override
+// whose range covers the tag; falls back to root when none match.
+enum E {
+	A, _;
+	def m() -> int { return 11; }
+}
+enum E.More {
+	B, C;
+	def m() -> int { return 33; }
+}
+def main(arg: int) -> int {
+	var b: E = E.More.B;
+	var a: E = E.A;
+	match (arg) {
+		0 => return b.m();
+		1 => return a.m();
+	}
+	return -1;
+}

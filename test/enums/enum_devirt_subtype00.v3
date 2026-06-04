@@ -1,0 +1,13 @@
+//@execute 0=1
+// Subtype-typed receiver inherits root's method; no descendant of E.Right
+// overrides m, so dispatch is uniform across E.Right's tag range. The optimizer
+// should devirtualize the CallVariantVirtual to a direct CallMethod[E.m].
+enum E { A, _; def m() -> int { return 1; } }
+enum E.Left { B; def m() -> int { return 2; } }
+enum E.Right { C; }
+
+def callOnRight(x: E.Right) -> int { return x.m(); }
+
+def main(i: int) -> int {
+    return callOnRight(E.Right.C);
+}

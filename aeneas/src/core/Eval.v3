@@ -47,6 +47,14 @@ component Eval {
 				}
 				return throw;
 			}
+			ENUM_CAST => {
+				// Open-enum subtype: check val.tag falls in [target.tagLo, target.tagHi].
+				if (val == null) return ok;
+				var tt2 = EnumType.!(tt);
+				var tag = if(Box<int>.?(val), Box<int>.!(val).val, 0);
+				if (tt2.enumDecl.tagLo <= tag && tag <= tt2.enumDecl.tagHi) return ok;
+				return throw;
+			}
 			INT_VIEW_I => {
 				return (true, doIntView(IntType.!(ft), IntType.!(tt), val));
 			}
@@ -129,6 +137,13 @@ component Eval {
 				if (val == null) return false;
 				if (tt.open()) return false;
 				return Record.?(val) && TypeSystem.isSubtype(Record.!(val).rtype, tt);
+			}
+			ENUM_QUERY => {
+				// Open-enum subtype: check val.tag falls in [target.tagLo, target.tagHi].
+				if (val == null) return false;
+				var tt2 = EnumType.!(tt);
+				var tag = if(Box<int>.?(val), Box<int>.!(val).val, 0);
+				return tt2.enumDecl.tagLo <= tag && tag <= tt2.enumDecl.tagHi;
 			}
 			FLOAT_QUERY_I => {
 				var t = fround_i(V3.isDouble(tt), IntType.!(ft), val);
@@ -810,15 +825,22 @@ def evalOp(op: Operator, args: Arguments) -> Result {
 			return if(object != null, object.values[field.index]);
 		}
 		VariantGetMethod(method) => {
-			var object = args.r(0);
 			var spec = args.getClosedIrSpec(method);
 			if (spec == null) return args.notFoldable(null);
-			return Closure.new(object, spec);
+			// Enum closure capture: receiver is an int tag, not a Record. Box the raw
+			// value into the closure unchanged; CallClosure (enum spec) reads it back.
+			if (V3.isEnum(spec.receiver)) return Closure.new(args.vals[0], spec);
+			return Closure.new(args.r(0), spec);
 		}
 		VariantGetVirtual(method) => {
-			var object = getRecordReceiver(args);
 			var spec = args.getClosedIrSpec(method);
 			if (spec == null) return args.notFoldable(null);
+			if (V3.isEnum(spec.receiver)) {
+				var recv = args.vals[0];
+				spec = lookupEnumVirtual(args, recv, spec);
+				return Closure.new(recv, spec);
+			}
+			var object = getRecordReceiver(args);
 			spec = lookupVariantVirtual(args, object, spec);
 			return Closure.new(object, spec);
 		}
@@ -921,9 +943,15 @@ def evalOp(op: Operator, args: Arguments) -> Result {
 			return args.tailCall(spec, object, 1, args.vals.length);
 		}
 		CallVariantVirtual(method) => {
-			var object = getRecordReceiver(args);
 			var spec = args.getClosedIrSpec(method);
 			if (spec == null) return args.notFoldable(null);
+			if (V3.isEnum(spec.receiver)) {
+				// Open-enum virtual dispatch: resolve by walking the parentEnum chain.
+				var rec = args.vals[0];
+				spec = lookupEnumVirtual(args, rec, spec);
+				return args.tailCall(spec, rec, 1, args.vals.length);
+			}
+			var object = getRecordReceiver(args);
 			spec = lookupVariantVirtual(args, object, spec);
 			return args.tailCall(spec, object, 1, args.vals.length);
 		}
@@ -1157,6 +1185,58 @@ def lookupClassVirtual(args: Arguments, object: Record, spec: IrSpec) -> IrSpec 
 def lookupVariantVirtual(args: Arguments, object: Record, spec: IrSpec) -> IrSpec {
 	if (object != null) return args.getProgram().ir.resolveMethodImpl(object.rtype, spec);
 	return args.getProgram().ir.resolveVariantDefaultMethodImpl(spec);
+}
+// Resolve an open-enum virtual call to its concrete IrMethod by walking the parentEnum
+// hierarchy. Mirrors the dispatch-table layout built by Normalization.layoutEnumMtable:
+// each subtype whose tag range contains `tag` may override the method; the deepest such
+// override wins.
+def lookupEnumVirtual(args: Arguments, recv: Val, spec: IrSpec) -> IrSpec {
+	var tag = 0;
+	if (Box<int>.?(recv)) tag = Box<int>.!(recv).val;
+	var rootEnum = EnumType.!(spec.receiver).enumDecl;
+	if (!IrMethod.?(spec.member)) return spec;
+	var name = IrMethod.!(spec.member).source.name();
+	var impl: IrMember = spec.member;
+	var implReceiver = spec.receiver;
+	var rootMethod: VstMethod;
+	var cur = rootEnum;
+	while (cur != null) {
+		if (cur.memberMap != null) {
+			var member = cur.memberMap[name];
+			if (VstMethod.?(member)) {
+				var vm = VstMethod.!(member);
+				if (rootMethod == null) rootMethod = vm.root;
+				var ic = args.getProgram().ir.makeIrClass(cur.getDeclaredType());
+				if (ic != null && vm.index >= 0 && vm.index < ic.methods.length) {
+					var subImpl = ic.methods[vm.index];
+					if (subImpl != null) {
+						impl = subImpl;
+						implReceiver = cur.getDeclaredType();
+					}
+				}
+			}
+		}
+		var next: VstEnum;
+		if (cur.subtypeOrder != null) {
+			for (l = cur.subtypeOrder; l != null; l = l.tail) {
+				if (l.head.tagLo <= tag && tag <= l.head.tagHi) {
+					next = l.head;
+					break;
+				}
+			}
+		}
+		cur = next;
+	}
+	// Per-case override at this tag wins over subtype/root fallbacks.
+	if (rootMethod != null && rootMethod.enumCaseImpls != null
+	    && tag >= 0 && tag < rootMethod.enumCaseImpls.length) {
+		var perCase = rootMethod.enumCaseImpls[tag];
+		if (perCase != null) {
+			impl = perCase;
+			implReceiver = perCase.receiver;
+		}
+	}
+	return IrSpec.new(implReceiver, [implReceiver], impl);
 }
 def getRecordReceiver(args: Arguments) -> Record {
 	// TODO: this a giant hack for adapting arguments to void calls

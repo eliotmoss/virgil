@@ -459,34 +459,134 @@ component Parser {
 		return true;
 	}
 	def parseEnum(p: ParserState, file: VstFile, isPrivate: bool) -> bool {
-		var id = parseIdentVoid(p);
-		var params = parseOptionalParams(p, parseEnumParam);
+		// Parse possibly-dotted name (open enum subtype declaration: `enum E.More { ... }`).
+		var triple = parseDottedTypeIdent(p);
+		var qualifiers = triple.0;
+		var qualifierTypeArgs = triple.1;
+		var id = triple.2;
+		if (id.params != null) p.error("enums cannot have type parameters");
+		// Subtype param forms: implicit (no clause), (super), (super, extras), or explicit
+		// (full restated list, possibly with extras). Root enums use the regular form.
+		var params: VstList<ParamDecl>;
+		var hasSuperKeyword = false;
+		var extraParamsList: List<ParamDecl>;
+		if (qualifiers != null) {
+			var r = parseSubtypeEnumParams(p);
+			params = r.0;
+			hasSuperKeyword = r.1;
+			extraParamsList = r.2;
+		} else {
+			params = parseOptionalParams(p, parseEnumParam);
+		}
 		// Synthesize "tag" and "name" members
 		var tagToken = Token.new(p.fileName, "tag", p.curLine, p.curCol);
 		var nameToken = Token.new(p.fileName, "name", p.curLine, p.curCol);
 		var list: List<VstMember>;
 		list = List.new(VstVariantTagMember.new(tagToken), list);
 		list = List.new(VstVariantNameMember.new(nameToken), list);
-		// Parse case members
+		// Parse case members and optional methods. Methods must follow cases after a `;` separator
+		// (matching the open_enums3b contract). A subtype enum may have no cases at all.
 		var cases = Vector<VstEnumCase>.new();
 		p.req1('{');
+		var inMethodSection = false;
+		var sawDefault = false;
 		while (true) {
 			if (p.curByte == '}') { p.advance1(); break; }
+			if (!inMethodSection && p.curByte == ';') {
+				p.advance1();
+				inMethodSection = true;
+				continue;
+			}
+			if (inMethodSection) {
+				var nlist = parseMember(p, list, false);
+				if (nlist == list) { p.opt1('}'); break; }
+				list = nlist;
+				continue;
+			}
+			if (sawDefault) {
+				p.error("'_' case must be last");
+				p.opt1('}');
+				break;
+			}
 			var c = parseEnumCase(p, cases.length);
 			if (c == null) { p.opt1('}'); break; }
+			if (Strings.equal(c.name(), "_")) sawDefault = true;
 			cases.put(c);
 			list = List.new(c, list);
 		}
 		var decl = VstEnum.new(isPrivate, id.name, params, cases.extract(), list);
+		decl.qualifiers = qualifiers;
+		decl.qualifierTypeArgs = qualifierTypeArgs;
+		decl.hasSuperKeyword = hasSuperKeyword;
+		decl.extraParamsList = extraParamsList;
 		file.enums.put(decl);
 		return true;
 	}
+	// Parses a subtype enum's parameter clause. Returns (params, hasSuperKeyword, extraList).
+	// Forms accepted:
+	//   <nothing>                 → implicit: treat as super, no extras
+	//   ()                        → explicit empty (must match parent's empty params)
+	//   (super)                   → super, no extras
+	//   (super, x: int, ...)      → super + extras
+	//   (x: int, ...)             → explicit restated prefix + extras
+	def parseSubtypeEnumParams(p: ParserState) -> (VstList<ParamDecl>, bool, List<ParamDecl>) {
+		if (p.curByte != '(') return (null, true, null);  // implicit
+		var openTok = p.token(1);  // consumes '('
+		var sup = optKeyword(p, "super");
+		if (sup != null) {
+			var extras: List<ParamDecl>;
+			while (p.curByte == ',') {
+				p.advance1();
+				var pd = parseEnumParam(p);
+				if (pd != null) extras = List.new(pd, extras);
+			}
+			p.req1(')');
+			return (null, true, Lists.reverse(extras));
+		}
+		// Explicit form: collect comma-separated params until ')'.
+		if (p.curByte == ')') {
+			p.advance1();
+			var closeTok = p.tokenAt(p.curLine, p.curCol);
+			return (VstList<ParamDecl>.new(openTok.range(), null), false, null);
+		}
+		var rev: List<ParamDecl>;
+		var first = parseEnumParam(p);
+		if (first != null) rev = List.new(first, rev);
+		while (p.curByte == ',') {
+			p.advance1();
+			var pd = parseEnumParam(p);
+			if (pd != null) rev = List.new(pd, rev);
+		}
+		p.req1(')');
+		return (VstList<ParamDecl>.new(openTok.range(), Lists.reverse(rev)), false, null);
+	}
 	def parseEnumCase(p: ParserState, tag: int) -> VstEnumCase {
-		var id = parseIdentVoid(p);
+		var name: Token;
+		if (p.curByte == '_' && !Char.isIdentMiddle(p.peek(1))) {
+			// default case `_` for open enums
+			if (!p.enableOpenTypes) p.error("open enum default case '_' requires -open-types flag");
+			name = p.token(1);
+		} else {
+			var id = parseIdentVoid(p);
+			if (id.name.image.length == 0) return null;
+			name = id.name;
+		}
 		var args = if(p.curByte == '(', parseList(0, p, '(', COMMA, ')', parseExpr));
+		// Optional per-case method body: case A { def m() ... }
+		var members: List<VstMember>;
+		if (p.curByte == '{') {
+			p.advance1();
+			while (true) {
+				if (p.curByte == '}') { p.advance1(); break; }
+				var nlist = parseMember(p, members, false);
+				if (nlist == members) { p.opt1('}'); break; }
+				members = nlist;
+			}
+		}
 		p.opt1(',');
-		if (id.name.image.length > 0) return VstEnumCase.new(tag, id.name, args);
-		return null;
+		var c = VstEnumCase.new(tag, name, args);
+		c.members = Lists.reverse(members);
+		return c;
 	}
 	def parseLayout(p: ParserState, file: VstFile) -> bool {
 		var id = parseIdentVoid(p).name;
