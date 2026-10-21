@@ -39,8 +39,12 @@ component CLOptions {
 		"Enable function expressions.").onSet(implySimpleBodies);
 	def SIMPLE_BODIES	= langOpt.newBoolOption("lang:simple-bodies", true,
 		"Enable simple function body syntax and return type inference.");
-	def DESCRIPTORS	= if(Debug.UNSTABLE, langOpt.newBoolOption("lang:descriptors", false,
+	def DESCRIPTORS		= if(Debug.UNSTABLE, langOpt.newBoolOption("lang:descriptors", false,
 		"Enable descriptors."), falseOption);
+	def ANNOTATIONS		= if(Debug.UNSTABLE, langOpt.newBoolOption("lang:annotations", false,
+		"Enable annotations."), falseOption);
+	def ANNOTATION_FILES	= langOpt.newOption("lang.annotation-files", Array<string>.new(0), "=<path*>", parseStringArray,
+		"List of .v3 files declaring the standard annotations, included when -lang:annotations is on. Separate paths with spaces.");
 	// Optimization and representation options.
 	def DESCEXT		= if(Debug.UNSTABLE, sharedOpt.newBoolOption("descext", false,
 		"Force described objects to use their descriptor as the object header.")
