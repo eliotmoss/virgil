@@ -250,6 +250,15 @@ class WasmCodeGen extends SsaMachGen {
 			}
 			PtrAdd => emitBinop(i, WasmOp.I32_ADD);
 			PtrSub => emitBinop(i, WasmOp.I32_SUB);
+			NullCheck => {
+				if (!V3Op.needsNullCheck(i, i.input0())) return;
+				var isNull = newTmpVReg(WasmValueType.I32);
+				var op = if(GC && isGcRef(i.op.typeArgs[0]), WasmOp.REF_IS_NULL, WasmOp.I32_EQZ);
+				emit2(op.opcode, dfnv0(isNull), use(i.input0()));
+				emit2(WasmOp.IF.opcode, useInt(WasmValueType.Void.toInt()), usev0(isNull));
+				emitN(WasmOp.UNREACHABLE.opcode);
+				emitN(WasmOp.END.opcode);
+			}
 			ConditionalThrow => {
 				emit2(WasmOp.IF.opcode, useInt(WasmValueType.Void.toInt()), use(i.inputs[0].dest));
 				emitN(WasmOp.UNREACHABLE.opcode);
@@ -847,6 +856,12 @@ class WasmCodeGen extends SsaMachGen {
 			emit3(op.opcode, dfn(i), use(matcher.x), use(matcher.y));
 		}
 	}
+	def isGcRef(t: Type) -> bool {
+		match (t) {
+			x: FuncType, x: AnyFuncType, x: RangeStartType, x: IntType, x: PointerType => return false;
+		}
+		return true;
+	}
 	def emitRefEq(i: SsaApplyOp) {
 		matcher.binop(i);
 		match (i.op.typeArgs[0]) {
@@ -967,10 +982,14 @@ class WasmCodeGen extends SsaMachGen {
 		if (SsaConst.?(a)) return (SsaConst.!(a).val, null);
 		var add = cover(Opcode.PtrAdd.tag, a);
 		if (add != null) {
-			var r = add.input1();
-			if (SsaConst.?(r)) return (SsaConst.!(r).val, add.input0());
+			match (add.input1()) {
+				x: SsaConst => if (!isNegativeInt(x.val)) return (x.val, add.input0());
+			}
 		}
 		return (null, a);
+	}
+	def isNegativeInt(val: Val) -> bool {
+		return Box<int>.?(val) && Box<int>.!(val).val < 0;
 	}
 	def emitShift(i: SsaApplyOp, op32: WasmOp, op64: WasmOp) {
 		if (PrimType.!(i.op.typeArgs[0]).width <= 32) {
@@ -1193,7 +1212,20 @@ class WasmCodeGen extends SsaMachGen {
 	}
 	def asmls(logAlign: int, a: Array<Operand>, offsetOperand: int) {
 		w.putb(logAlign);	// flags = alignment
-		emitInt(a[offsetOperand]);  // offset
+		emitOffset(a[offsetOperand]);
+	}
+	def emitOffset(o: Operand) {
+		var val = Operand.Immediate.!(o).val;
+		match (val) {
+			x: Addr => emitOffsetAddr(x);
+			x: Record => emitOffsetAddr(mach.addrOfRecord(x));
+			x: Box<int> => w.put_uleb32(u32.view(x.val));
+			_ => emitInt(o);
+		}
+	}
+	def emitOffsetAddr(addr: Addr) {
+		w.recordPatch(PatchKind.ABS_ULEB32, addr, w.pos);
+		w.skipN(5);
 	}
 	def emitEntryStub(test: bool) {
 		def b = w.putb;

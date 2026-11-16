@@ -32,7 +32,7 @@ AENEAS_SOURCES=${AENEAS_SOURCES:=$(ls $VIRGIL_LOC/aeneas/src/*/*.v3)}
 AENEAS_LOC=${AENEAS_LOC:=${VIRGIL_LOC}/aeneas/src}
 
 # Set defaults.
-V3C_HEAP_SIZE=${V3C_HEAP_SIZE:="-heap-size=1500m"}
+V3C_HEAP_SIZE=${V3C_HEAP_SIZE:=}  # if unset, chosen per target in compile_aeneas
 TEST_GC_WASM=${TEST_GC_WASM:=1}
 
 # Progress arguments. By default the inline (i) mode is used, while the CI sets
@@ -150,9 +150,11 @@ function do_parser_tests() {
 
 # Runs tests in ./seman/*.v3
 function do_seman_tests() {
+    # An optional target makes target-provided components (e.g. "CiRuntime") resolve.
+    local target=$1
     cd seman
     print_status Semantic ""
-    run_v3c "" -test -expect=failures.txt *.v3 | tee $OUT/out | $PROGRESS
+    run_v3c "" -test ${target:+-target=$target} -expect=failures.txt *.v3 | tee $OUT/out | $PROGRESS
     # TODO: accumulate errors and continue?
     fail_fast
     cd ..
@@ -267,6 +269,13 @@ function run_or_skip_io_tests() {
         print_status Running $tname
         run_io_tests $target $runner $@ | tee $OUT/$target/run-$tname.out | $PROGRESS
     done
+}
+
+# Does the compiler under test know the target? The stable compiler may predate
+# a target that the current sources add, e.g. the unit and lib suites run on
+# stable while the targets under test include a newer native target.
+function is_known_target() {
+    ! $AENEAS_TEST -target=$1 < /dev/null 2>&1 | grep -q "Unknown target"
 }
 
 function run_v3c() {
@@ -437,7 +446,14 @@ function compile_aeneas() {
     if [ ! -x $CMD ]; then
 	CMD=bin/dev/v3c-$target
     fi
-    V3C=$HOST_AENEAS $CMD $V3C_HEAP_SIZE $V3C_OPTS -jvm.script -jvm.args="$AENEAS_JVM_TUNING" -output=$TARGET_DIR $SRCS
+    local HEAP_SIZE=$V3C_HEAP_SIZE
+    if [ -z "$HEAP_SIZE" ]; then
+	case "$target" in
+	    x86-linux|x86-darwin) HEAP_SIZE="-heap-size=800m" ;;
+	    *) HEAP_SIZE="-heap-size=2000m" ;;
+	esac
+    fi
+    V3C=$HOST_AENEAS $CMD $HEAP_SIZE $V3C_OPTS -jvm.script -jvm.args="$AENEAS_JVM_TUNING" -output=$TARGET_DIR $SRCS
     EXIT_CODE=$?
     popd > /dev/null
     if [ $EXIT_CODE != 0 ]; then
@@ -470,7 +486,7 @@ function get_io_targets() {
 
 function is_gc_target() {
     case $target in
-	x86-darwin|x86-64-darwin|x86-linux|x86-64-linux|arm64-linux)
+	x86-darwin|x86-64-darwin|x86-linux|x86-64-linux|arm64-linux|riscv64-linux)
 	    return 0
 	    ;;
 	wasm)
@@ -485,7 +501,7 @@ function get_vm_addr_width() {
 	x86-darwin|x86-linux|wasm)
 	    echo 32
 	    ;;
-	x86-64-darwin|x86-64-linux|arm64-linux)
+	x86-64-darwin|x86-64-linux|arm64-linux|riscv64-linux)
 	    echo 48
 	    ;;
     esac
@@ -496,7 +512,7 @@ function get_addr_width() {
 	x86-darwin|x86-linux|wasm)
 	    echo 32
 	    ;;
-	x86-64-darwin|x86-64-linux|arm64-linux)
+	x86-64-darwin|x86-64-linux|arm64-linux|riscv64-linux)
 	    echo 64
 	    ;;
     esac
@@ -507,7 +523,7 @@ function get_rt_files() {
     N="$RT_LOC/native/"
 
     case $target in
-	x86-darwin|x86-64-darwin|x86-linux|x86-64-linux|arm64-linux)
+	x86-darwin|x86-64-darwin|x86-linux|x86-64-linux|arm64-linux|riscv64-linux)
 	    echo $RT_LOC/$target/*.v3 $N/*.v3
 	    ;;
 	wasm)
@@ -521,7 +537,7 @@ function get_gc_files() {
     GC_SOURCES="${GC_LOC}/*.v3"
 
     case $target in
-	x86-darwin|x86-64-darwin|x86-linux|x86-64-linux|arm64-linux|wasm)
+	x86-darwin|x86-64-darwin|x86-linux|x86-64-linux|arm64-linux|riscv64-linux|wasm)
 	    echo $GC_SOURCES
 	    ;;
     esac

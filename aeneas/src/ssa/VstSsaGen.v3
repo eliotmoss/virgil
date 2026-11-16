@@ -46,6 +46,7 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 	var recordDirectCalls: bool;
 	var directCallTargets: List<IrSpec>;
 	var directCallBlocks: List<SsaBlock>;
+	var opt: SsaOptimizer;			// if non-null, optimizes instructions as they are added
 
 	new(context, opBuilder) {
 		var params = Array<SsaParam>.new(func.numParams);
@@ -82,7 +83,7 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 			Lists.apply(func.params.list, initialEnv.addNewVarDecl);
 			if (VstNew.?(meth)) addConstructorCode(VstNew.!(meth), initialEnv);
 			func.body.accept(this, initialEnv);
-			if (!initialEnv.end) {
+			if (!initialEnv.end()) {
 				// add an appropriate return
 				if (func.returnThis) initialEnv.addReturn([getThisParam()]);
 				else initialEnv.addReturn([graph.nop()]);
@@ -173,9 +174,9 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 	def visitIf(stmt: IfStmt, env: VstSsaEnv) -> SsaInstr {
 		// translate an if statement into control flow
 		var cond = env.genExpr(stmt.cond);
-		if (env.end) return null; // condition ended the block somehow
+		if (env.end()) return null; // condition ended the block somehow
 		if (context.compiler.VstBranchOpt && SsaConst.?(cond)) {
-			if (cond.unbox<bool>()) {
+			if (V3.unboxBool(SsaConst.!(cond).val)) {
 				// fold a branch that is always true
 				env.genStmt(stmt.tbranch);
 				return null;
@@ -218,7 +219,7 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 		var header = loopStart.block;
 		var loopEnv = loopStart.startLoop(env, stmt.loopNum);
 		var cond = loopEnv.genExpr(stmt.cond);
-		if (loopEnv.end) return null; // condition ended the block somehow
+		if (loopEnv.end()) return null; // condition ended the block somehow
 		if (context.compiler.VstBranchOpt && Ssa.isFalseConst(cond)) {
 			// this is not a loop at all; skip the body
 			return loopFallThru(env, loopEnv);
@@ -254,7 +255,7 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 		var arrayType = stmt.expr.exactType;
 		if (EnumType.?(arrayType)) return genEnumIteration(stmt, EnumType.!(arrayType), env);
 		var arrayExpr = env.genExpr(stmt.expr);
-		if (env.end) return null; // expression generated a throw
+		if (env.end()) return null; // expression generated a throw
 		if (EnumSetType.?(arrayType)) return genEnumSetIteration(stmt, EnumSetType.!(arrayType), arrayExpr, env);
 
 		env[stmt.loopVar] = graph.zeroConst();
@@ -344,14 +345,22 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 	}
 	def genEnumSetIteration(stmt: ForeachStmt, tc: EnumSetType, set: SsaInstr, env: VstSsaEnv) -> SsaInstr {
 		// TODO: desugar and use genThreePartFor
-		// XXX: shift the set down by a bit each iteration and terminate when zero
-		env[stmt.loopVar] = graph.zeroConst();
+		// Iterate over the set itself: shift the remaining set down by one bit each
+		// iteration and terminate when it becomes zero (early exit for sparse sets).
+		var it = tc.repType;
 		// XXX: it's a hack to use a VarDecl in the nonSsaVars array
+		// The internal index variable, typed as int.
+		env[stmt.loopVar] = graph.zeroConst();
 		var varDecl = VarDecl.new(null, null, null);
 		varDecl.vtype = Int.TYPE;
 		varDecl.ssa = stmt.loopVar;
 		nonSsaVars[stmt.loopVar.index] = varDecl;
-		var limitExpr = graph.intConst(tc.repType.width);
+		// The internal variable holding the remaining set, typed as the representation type.
+		env[stmt.loopVar2] = set;
+		var setDecl = VarDecl.new(null, null, null);
+		setDecl.vtype = it;
+		setDecl.ssa = stmt.loopVar2;
+		nonSsaVars[stmt.loopVar2.index] = setDecl;
 		env.at(exprSource(stmt.expr));
 
 		var loopCond = VstSsaMerge.new(this);   // merge point for start of loop
@@ -361,36 +370,41 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 		var loopEnv = loopCond.startLoop(env, stmt.loopNum);
 		loopEnv.loopStart = loopUpdate;
 		loopEnv.loopEnd = loopEnd;
-		// add the loop control expression
-		var cond = loopEnv.opIntLt(loopEnv[stmt.loopVar], limitExpr);
+		// add the loop control expression; exit the loop when the remaining set is empty
+		var done = loopEnv.add(it.opEq(), [loopEnv[stmt.loopVar2], graph.nullConst(it)], Facts.NONE);
 
 		var testEnv = loopEnv.split();
-		loopEnv.addIf(cond, testEnv.block, loopEnv.loopEnd.block);
+		loopEnv.addIf(done, loopEnv.loopEnd.block, testEnv.block);
 		loopEnd.mergeIncoming(loopEnv);
-		// convert int to the enum element with the same tag
-		var e = testEnv.opIntViewI0(Int.TYPE, tc.enumDecl.tagType, loopEnv[stmt.loopVar]);
-		var elem = e;
-		if (EnumSetType.?(stmt.varDecl.vtype)) {
-			// insert a coercion from enum to set
-			elem = tc.genEnumToSet(elem, testEnv);
-		}
-		testEnv[stmt.varDecl.ssa] = elem;
 
-		// check the elem is a member
-		var isMember = testEnv.opEnumSetHas(tc, set, e);
+		// check whether the enum value with the current tag is a member of the set
+		var one = graph.valConst(it, it.box(1));
+		var low = testEnv.add(it.opAnd(), [testEnv[stmt.loopVar2], one], Facts.NONE);
+		var isMember = testEnv.add(it.opEq(), [low, one], Facts.NONE);
 		var bodyEnv = testEnv.split();
 		testEnv.addIf(isMember, bodyEnv.block, loopUpdate.block);
 		loopUpdate.mergeIncoming(testEnv);
+
+		// convert the index to the enum element with the same tag
+		var viewOp = V3Op.newEnumViewI(Int.TYPE, tc.enumDecl.getDeclaredType());
+		var elem: SsaInstr = bodyEnv.pure(viewOp, [bodyEnv[stmt.loopVar]]);
+		if (EnumSetType.?(stmt.varDecl.vtype)) {
+			// insert a coercion from enum to set
+			elem = tc.genEnumToSet(elem, bodyEnv);
+		}
+		bodyEnv[stmt.varDecl.ssa] = elem;
 
 		// generate the body
 		bodyEnv.genStmt(stmt.body);
 		loopUpdate.merge(bodyEnv);
 
-		// add the update to the loop control variable
+		// add the updates to the loop control variables
 		if (loopUpdate.reachable()) {
 			var env = loopUpdate.toEnv(loopEnv);
 			var update = env.at(exprSource(stmt.expr)).opIntAdd(env[stmt.loopVar], graph.oneConst());
 			env[stmt.loopVar] = update;
+			var shr = env.add(it.opShr(), [env[stmt.loopVar2], graph.oneConst()], Fact.O_NO_SHIFT_CHECK);
+			env[stmt.loopVar2] = shr;
 			loopCond.merge(env);
 		}
 		loopEnd.setEnv(env);
@@ -426,7 +440,7 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 		loopEnv.loopStart = loopUpdate;
 		loopEnv.loopEnd = loopEnd;
 		var cond = loopEnv.genExpr(cond);
-		if (loopEnv.end) return null; // condition ended the block somehow
+		if (loopEnv.end()) return null; // condition ended the block somehow
 		if (context.compiler.VstBranchOpt && Ssa.isFalseConst(cond)) {
 			// this is not a loop at all; skip the body
 			return loopFallThru(env, loopEnv);
@@ -459,8 +473,7 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 		return null;
 	}
 	def loopFallThru(env: VstSsaEnv, loopEnv: VstSsaEnv) -> SsaInstr {
-		env.end = loopEnv.end;
-		env.block = loopEnv.block;
+		env.set(loopEnv.block).setPrev(loopEnv.prev);
 		env.varMap = loopEnv.varMap;
 		return null;
 	}
@@ -499,7 +512,7 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 		// generate code for key
 		var key = env.genExpr(stmt.expr), keyType = stmt.expr.exactType;
 		var origKey = key;
-		if (env.end) return null; // condition ended the block somehow
+		if (env.end()) return null; // condition ended the block somehow
 		// Try constant-folding first.
 		if (context.compiler.VstBranchOpt && SsaConst.?(key)) return foldMatch(stmt, env, keyType, key);
 
@@ -541,7 +554,7 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 				if (pats.length == 1) pat = pats[0];
 			} else {
 				// last case
-				cenv.block = cur.block;
+				cenv.set(cur.block);
 				if (c.patterns != null && c.patterns.length() == 1) pat = c.patterns.list.head;
 			}
 			// generate the body of the case and merge to end
@@ -1141,9 +1154,9 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 		// isAnd  &&: if(left) right; else (); phi(left, right)
 		// !isAnd ||: if(left) (); else right; phi(left, right)
 		var le = env.genExpr(left);
-		if (env.end) return env.addDefaultValue(le.getType());
+		if (env.end()) return env.addDefaultValue(le.getType());
 		// fold (K && e) and (K || e)
-		if (SsaConst.?(le)) return foldLazyEvalL(isAnd, le.unbox<bool>(), right, env);
+		if (SsaConst.?(le)) return foldLazyEvalL(isAnd, V3.unboxBool(SsaConst.!(le).val), right, env);
 		var merge = VstSsaMerge.new(this);
 		var fenv = env.split();
 		if (isAnd) {
@@ -1153,19 +1166,19 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 			env.addIf(le, merge.block, fenv.block);
 			merge.mergeIncoming(env);
 		}
-		var re = fenv.genExpr(right), fend = fenv.end;
+		var re = fenv.genExpr(right), fend = fenv.end();
 		merge.merge(fenv);
 		// fold (e && K) and (e || K)
 		if (SsaConst.?(re)) {
 			merge.setEnv(env);
-			return foldLazyEvalR(isAnd, le, re.unbox<bool>());
+			return foldLazyEvalR(isAnd, le, V3.unboxBool(SsaConst.!(re).val));
 		}
 		if (le == re) {
 			// x [&&,||] x == x
 			merge.setEnv(env);
 			return le;
 		} else {
-			// if fenv.end, then the false branch is a dead end (e.g. a throw)
+			// if fenv.end(), then the false branch is a dead end (e.g. a throw)
 			var ce = graph.boolConst(!isAnd);
 			var result = if(fend, ce, merge.newPhi2(Bool.TYPE, ce, re));
 			merge.setEnv(env);
@@ -1195,7 +1208,7 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 		var exprs = expr.exprs.asArray();
 		var cond = env.genExpr(exprs[0]);
 		if (context.compiler.VstBranchOpt && SsaConst.?(cond)) {
-			if (cond.unbox<bool>()) {
+			if (V3.unboxBool(SsaConst.!(cond).val)) {
 				// condition is always true
 				return env.genExpr(exprs[1]);
 			} else {
@@ -1208,25 +1221,28 @@ class VstSsaGen extends VstVisitor<VstSsaEnv, SsaInstr> {
 		var trueVal = tenv.genExpr(exprs[1]);
 		var falseVal = if(exprs.length == 3, fenv.genExpr(exprs[2]), fenv.addDefaultValue(expr.exactType));
 		var merge = VstSsaMerge.new(this);
-		var trueThru = !tenv.end, falseThru = !fenv.end;
+		var trueThru = !tenv.end(), falseThru = !fenv.end();
 		merge.merge(tenv);
 		merge.merge(fenv);
-		merge.setEnv(env);
+		var result: SsaInstr;
 		if (trueThru) {
 			// did both fall through?
 			var t = elimTypeVars(expr.exactType);
 			if (falseThru) {
-				if (trueVal == falseVal) return trueVal; // same in either case
-				else return merge.newPhi2(t, trueVal, falseVal);
+				if (trueVal == falseVal) result = trueVal; // same in either case
+				else result = merge.newPhi2(t, trueVal, falseVal);
+			} else {
+				// only the true branch fell through
+				result = trueVal;
 			}
-			// only the true branch fell through
-			return trueVal;
-		}
-		if (falseThru) {
+		} else if (falseThru) {
 			// only the false branch fell through
-			return falseVal;
+			result = falseVal;
+		} else {
+			result = graph.nop(); // neither fell through
 		}
-		return graph.nop(); // neither fell through
+		merge.setEnv(env); // after any phis, so that {env} inserts after them
+		return result;
 	}
 	def visitFunExpr(expr: FunExpr, env: VstSsaEnv) -> SsaInstr {
 		// The function is lifted to the outer container (component or class).
@@ -1279,6 +1295,7 @@ class VstSsaEnv extends SsaBuilder {
 	var loopEnd: VstSsaMerge;
 
 	new(size: int, gen, parent, block: SsaBlock) super(gen.context, gen.graph, block) {
+		opt = gen.opt;
 		if (parent == null) varMap = Array.new(size);
 		else varMap = parent.varMap;
 	}
@@ -1327,17 +1344,17 @@ class VstSsaEnv extends SsaBuilder {
 	}
 	def genVarDecl(v: VarDecl) {
 		if (v.ssa.index >= 0) gen.nonSsaVars[v.ssa.index] = v;
-		if (!end) this[v.ssa] = if(v.init != null, genExpr(v.init), addDefaultValue(v.vtype));
+		if (!end()) this[v.ssa] = if(v.init != null, genExpr(v.init), addDefaultValue(v.vtype));
 		addNewVarDecl(v);
 	}
 	def addNewVarDecl(v: VarDecl) {
 		addNewVar(v.name(), v.vtype, v.ssa.index, [this[v.ssa]]);
 	}
 	def genStmt(s: Stmt) {
-		if (!end) s.accept(gen, this);
+		if (!end()) s.accept(gen, this);
 	}
 	def genExpr(e: Expr) -> SsaInstr {
-		if (!end) {
+		if (!end()) {
 			var i = e.accept(gen, this);
 			var it = e.implicitType, xt = e.exactType;
 			if (it == null || it == xt) return i;
@@ -1385,7 +1402,7 @@ class VstSsaMerge(gen: VstSsaGen) {
 	}
 	def merge(env: VstSsaEnv) {
 		// merge with the given ssa environment if it falls through
-		if (!env.end) {
+		if (!env.end()) {
 			env.addGoto(block);
 			mergeEdge(env, env.block.succ(0));
 		}
@@ -1449,15 +1466,13 @@ class VstSsaMerge(gen: VstSsaGen) {
 	def setEnv(env: VstSsaEnv) {
 		// set the environment to be this block, if reachable
 		if (predValues.length > 0) {
-			env.block = block;
+			env.set(block);
 			// XXX: transfer ownership instead of copying?
 			env.varMap = Arrays.dup(varMap);
-			env.end = false;
 			// XXX: optimize phis at this point
 		} else {
-			env.block = null;
+			env.set(null);
 			env.varMap = null;
-			env.end = true;
 		}
 	}
 	def reachable() -> bool {

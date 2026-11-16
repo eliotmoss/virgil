@@ -21,6 +21,7 @@ class NormalizerConfig {
 	var GetScalar: (Compiler, Program, Type) -> Scalar.set = defaultGetScalar;
 	var GetBitWidth: Type -> byte = defaultGetBitWidth;
 	var MaxScalarWidth: byte = 64u8;
+	var RefPatterns: RefPatterns;	// patterns for tagged references, non-null if references can carry tag bits (set by the backend)
 
 	def setSignatureLimits(maxp: int, maxr: int) {
 		if (maxp < MaxParams) MaxParams = maxp;
@@ -31,6 +32,8 @@ def defaultGetScalar(compiler: Compiler, prog: Program, t: Type) -> Scalar.set {
 	match (t) {
 		x: FloatType => return if(x.is64, Scalar.F64, Scalar.F32);
 		x: PrimType => return if(x.width <= 32, Scalar.B32 | Scalar.B64, Scalar.B64);
+		x: FuncType => return Scalar.Func;
+		x: AnyFuncType => return Scalar.Func;
 		_ => return Scalar.Ref;
 	}
 }
@@ -56,6 +59,9 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 	var virtuals: List<RaVirtual>;
 	var ovfAlloc: OverflowFieldAllocator;
 
+	var arrayByteNorm: ArrayNorm;
+	var rangeByteNorm: RangeNorm;
+	var rangeStartType: Type;
 	var vn: VariantNormalizer;
 
 	new() { vn = VariantNormalizer.new(config, this, CLOptions.PRINT_RA.get()); }
@@ -73,6 +79,11 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 		ra.arrays.apply(visitArrayType);
 		// Compute the representation of classes, components, and variants, including field layout.
 		classOrder.apply(visitClassType);
+
+		// Initialize some globally-cached normalizations
+		this.arrayByteNorm = ArrayNorm.!(norm(V3.arrayByteType));
+		this.rangeByteNorm = RangeNorm.!(norm(V3.rangeByteType));
+		this.rangeStartType = if(config.NormalizeRange, V3Range.START_TYPE, config.RangeStartType);
 
 		if (ra.compiler.PartialSpecialization) {
 			// if partial specialization is enabled, do specialization analysis
@@ -386,16 +397,16 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 		}
 		rc.liveFields = fields.extract();
 	}
-	// Compute the normalization of the original field types of a class.
-	def makeOrigFieldTypes(rc: RaClass) {
-		if (rc.origFieldTypes != null) return;
+	// Compute the positions of each original field's scalars among the inputs of an allocation.
+	def makeOrigIndices(rc: RaClass) {
+		if (rc.origIndicesDone) return;
+		rc.origIndicesDone = true;
 		var flat = NormFlattener.new(context, norm);
 		for (i < rc.fields.length) {
 			var indices = flat.addField(rc, i);
 			var rf = rc.fields[i];
 			if (rf != null) rf.origIndices = indices;
 		}
-		rc.origFieldTypes = flat.result.extract();
 	}
 	// normalize an old record of a class into a new record of a class
 	def normClassRecord(rc: RaClass, oldRecord: Record, newRecord: Record) {
@@ -416,19 +427,25 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 			recordMap[oldRecord] = newRecord;
 			normalizeFields(rc.fields, oldRecord.values, newRecord.values);
 			result[0] = newRecord;
-		} else if (vn.isEnum()) {
+		} else if (rc.raFacts.RC_ENUM) {
 			// Variant is represented by a simple enum.
-			result[0] = Int.box(rc.variantNorm.tagValue);
+			result[0] = Int.box(rc.tagValue());
 		} else {
 			// Variant is unboxed. First normalize fields and then pack them into scalars with a tag.
 			vn = rc.variantNorm;
 			var values = Array<Val>.new(rc.liveFields.length);
 			normalizeFields(rc.fields, oldRecord.values, values);
 
+			if (vn.fixedBits != null) {
+				// tagged reference scalars start with their fixed bits, e.g. the non-reference marker
+				for (k < result.length) {
+					if (vn.fixedBits[k] != 0 && AnyRefType.?(vn.at(k))) result[k] = boxL(config.MaxScalarWidth, long.view(vn.fixedBits[k]));
+				}
+			}
 			if (vn.hasExplicitTag()) {
-				var val = Int.box(vn.tagValue);
+				var val = Int.box(rc.tagValue());
 				var tagIdx = vn.tag.indexes[0];
-				result[tagIdx] = packScalar(vn.tag.tn.at(0), vn.at(tagIdx), null, val, if(vn.tag.intervals != null, vn.tag.intervals[0]));
+				result[tagIdx] = packScalar(vn.tag.tn.at(0), vn.at(tagIdx), result[tagIdx], val, if(vn.tag.intervals != null, vn.tag.intervals[0]));
 			}
 
 			for (i < vn.fields.length) {
@@ -447,7 +464,6 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 	def packScalar(field_type: Type, scalar_type: Type, scalar: Val, val: Val, interval: Interval) -> Val {
 		if (field_type == scalar_type) return val; // special case of 1-1 mapping
 		match (scalar_type) {
-			// TODO: masking of negative integer values
 			it: IntType => {
 				match (val) {
 					x: Float64Val => val = boxL(it.width, long.view(x.bits) << interval.start);
@@ -460,21 +476,42 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 							_ => context.fail1("Received unknown field type with value Box<IntType>: %q", field_type.render);
 
 						}
-						// Clear the leftmost remainder bits when reprsenting `val` as a long
-						def ut: IntType = Int.getType(false, width);
-						var masked: long;
+						var bits: long;
 						match (val) {
-							x: Box<int> => masked = long.view(ut.viewu(u32.view(x.val)));
-							x: Box<long> => masked = ut.viewl(x.val);
+							x: Box<int> => bits = x.val;
+							x: Box<long> => bits = x.val;
 							_ => context.fail("Unexpected val type when packing scalar\n");
 						}
-						val = boxL(it.width, masked << interval.start);
+						// A field packed into an interval holds only its own bits; otherwise the scalar holds its view
+						if (interval.size() > 0) bits = Int.getType(false, width).viewl(bits);
+						val = boxL(it.width, bits << interval.start);
 					}
 					x: Box<bool> => val = boxL(it.width, if(x.val, 1L << interval.start));
 				}
 				if (scalar != null) match (it.rank) {
 					SUBI32, SUBU32, I32, U32 => val = Int.box(Int.unbox(scalar) | Int.unbox(val));
 					SUBI64, SUBU64, I64, U64 => val = Long.box(Long.unboxSU(scalar, false) | Long.unboxSU(val, false));
+				}
+			}
+			at: AnyRefType => {
+				// A tagged reference scalar holds either a reference (possibly with tag bits) or a non-reference.
+				match (val) {
+					null => return scalar;
+					x: Record => {
+						if (scalar == null) return x;
+						if (Record.?(scalar) || TaggedRecord.?(scalar)) context.fail1("cannot pack two references into scalar %q", scalar_type.render);
+						return TaggedRecord.new(x, Long.unboxSU(scalar, false));
+					}
+					_ => {
+						var it = Int.getType(false, config.MaxScalarWidth);
+						var bits = Long.unboxSU(packScalar(field_type, it, null, val, interval), false);
+						match (scalar) {
+							null => return boxL(it.width, bits);
+							x: Record => return TaggedRecord.new(x, bits);
+							x: TaggedRecord => return TaggedRecord.new(x.record, x.tag | bits);
+							_ => return boxL(it.width, Long.unboxSU(scalar, false) | bits);
+						}
+					}
 				}
 			}
 			_ => if (scalar != null) {
@@ -778,13 +815,11 @@ class ReachabilityNormalizer(config: NormalizerConfig, ra: ReachabilityAnalyzer)
 		if (rc.raFacts.RC_LIVE) ic.flags |= IrFlag.C_HEAP;
 		if (rc.raFacts.RC_ALLOC) ic.flags |= IrFlag.C_ALLOCATED;
 		if (rc.raFacts.RC_ENUM) ic.flags |= IrFlag.C_ENUM;
-		// Propagate descriptor flags from the original class, but only if the program uses
-		// descriptor extensions. Otherwise a descriptor is just an ordinary field and
-		// described objects keep the normal object header.
-		if (rc.orig != null && ra.descriptorExtensions) {
-			if (rc.orig.flags.C_HAS_DESCRIPTOR) ic.flags |= IrFlag.C_HAS_DESCRIPTOR;
-			if (rc.orig.flags.C_IS_DESCRIPTOR) ic.flags |= IrFlag.C_IS_DESCRIPTOR;
-		}
+		// Only hierarchies with a branded descriptor use descriptor headers; elsewhere a
+		// descriptor is an ordinary field. C_HAS_DESCRIPTOR reserves offset 0 for that field,
+		// so it must agree with {ReachabilityAnalyzer.useDescriptorHeader}.
+		if (ra.usesDescriptorHeader(rc)) ic.flags |= IrFlag.C_HAS_DESCRIPTOR;
+		if (ra.usesDescriptorSlots(rc)) ic.flags |= IrFlag.C_IS_DESCRIPTOR;
 		newIr.setIrClass(rc.newIrType, ic);
 		var i = 0;
 		for (f in ic.fields) {

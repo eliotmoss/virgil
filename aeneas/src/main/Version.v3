@@ -3,6 +3,7 @@
 
 // Updated by VCS scripts. DO NOT EDIT.
 component Version {
-	def version: string = "III-11.1968";
+	def UNSTABLE = true;
+	def version: string = "III-13.2014";
 	var buildData: string;
 }

@@ -1,8 +1,6 @@
 // Copyright 2023 Virgil Authors. All rights reserved.
 // See LICENSE for details of Apache 2.0 license.
 
-def COLOR_RESERVE = 2;
-
 // Which worklist a node is currently on. Appel's worklists are sets, so a node must never
 // appear on one twice; a node's degree can rise again while coalescing merges nodes, so it
 // can reach the "trivially colorable" threshold more than once.
@@ -39,7 +37,7 @@ class GlobalRegAlloc(regSet: MachRegSet, codegen: SsaMachGen) {
 	var verbose = false;
 	var stackMoves = false;
 	// --- graph coloring ------------------
-	def availableColor = regSet.regSets[regSet.regClasses[RegClass.REF.tag]].length - COLOR_RESERVE;
+	def availableColor = regSet.numColors(RegClass.REF);
 	def simplifyWorklist = Vector<int>.new();
 	def freezeWorklist = Vector<int>.new();
 	def spillWorklist = Vector<int>.new();
@@ -55,6 +53,7 @@ class GlobalRegAlloc(regSet: MachRegSet, codegen: SsaMachGen) {
 	// --- allocate after coloring ----------
 	def regState = RegState.new(regSet, codegen);
 	def regUsage = Array<int>.new(regSet.physRegs);
+	var curParMoves: MoveResolver;	// move graph being resolved by emitParMoves
 	def movesNext = MoveSet.new(regSet);
 	def movesPrev = MoveSet.new(regSet);
 	def regindex = Array<(int, VReg)>.new(regSet.physRegs);
@@ -446,7 +445,7 @@ class GlobalRegAlloc(regSet: MachRegSet, codegen: SsaMachGen) {
 			// Test membership with set matrix, since constraint set and the register class are not necessarily sorted.
 			var set = regSet.regClasses[vreg.regClass.tag];
 			var rset = regSet.regSets[set];
-			for (i < rset.length - COLOR_RESERVE) {
+			for (i < regSet.numColors(vreg.regClass)) {
 				var reg = rset[i];
 				if (!regSet.isInRegSet(reg, constraint)) graph.addEdge(vreg.varNum, -reg);
 			}
@@ -526,7 +525,7 @@ class GlobalRegAlloc(regSet: MachRegSet, codegen: SsaMachGen) {
 			}
 			// Find a free one and pick a register from the appropriate register class.
 			var set = regSet.regClasses[vreg.regClass.tag];
-			for (i < regSet.regSets[set].length - COLOR_RESERVE) {
+			for (i < regSet.numColors(vreg.regClass)) {
 				var reg = regSet.regSets[set][i];
 				if (!allocatedColor[reg]) {
 					coloring[nid] = reg;
@@ -950,6 +949,7 @@ class GlobalRegAlloc(regSet: MachRegSet, codegen: SsaMachGen) {
 	// to solve potential cycle.
 	def emitParMoves(cur: ArchInstr, next: ArchInstr) {
 		var mr = MoveResolver.new(codegen.context.prog.ERROR);
+		curParMoves = mr;
 		var operands = cur.operands;
 		var half = operands.length >> 1;
 		for (i < half) {
@@ -982,6 +982,7 @@ class GlobalRegAlloc(regSet: MachRegSet, codegen: SsaMachGen) {
 		}
 		cur.remove();
 		mr.genMoves(allocMoveTmp, addMove(_, _, _, next));
+		curParMoves = null;
 	}
 	def addMove(src: int, dst: int, regClass: RegClass, next: ArchInstr) {
 		if (verbose) Terminal.put3("  insertMove %s <- %s regClass=%s\n", regSet.identify(dst), regSet.identify(src), regClass.name);
@@ -992,8 +993,18 @@ class GlobalRegAlloc(regSet: MachRegSet, codegen: SsaMachGen) {
 			codegen.insertMoveLocLoc(Operand.Use(null, src), Operand.Def(null, dst), regClass, next);
 		}
 	}
-	def allocMoveTmp(regClass: RegClass) -> int { // XXX: move to codegen
-		return regSet.scratch[regClass.tag];
+	// Allocate a temporary to break a cycle in a parallel move. The scratch
+	// register cannot be used: a stack-to-stack move inside the cycle would
+	// clobber it. Prefer a register that is free at this point and not
+	// involved in the move graph; fall back to a dedicated spill slot.
+	def allocMoveTmp(regClass: RegClass) -> int {
+		for (reg in regSet.regSets[regSet.regClasses[regClass.tag]]) {
+			if (regState.regState[reg] >= 0) continue;   // holds a live value
+			if (isUsedInThisInstr(reg)) continue;
+			if (curParMoves.getNode(reg) != null) continue; // source or destination of a move
+			return reg;
+		}
+		return codegen.frame.getTmpSpill(regClass);
 	}
 	def printGraph() {
 		Terminal.put("Interference graph:");

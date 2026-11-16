@@ -48,6 +48,11 @@ component Eval {
 				}
 				return throw;
 			}
+			FUNC_CAST => {
+				if (val == null) return ok;
+				if (FuncVal.?(val) && TypeSystem.isSubtype(FuncVal.!(val).memberRef.getFuncType(), tt)) return ok;
+				return throw;
+			}
 			INT_VIEW_I => {
 				return (true, doIntView(IntType.!(ft), IntType.!(tt), val));
 			}
@@ -211,7 +216,7 @@ class Arguments {
 	}
 	// Convenience accessors that perform casts on arguments
 	def it(i: int) -> IntType { return IntType.!(getTypeArg(i)); }
-	def z(i: int) -> bool { return Bool.unbox(vals[i]); }
+	def z(i: int) -> bool { return V3.unboxBool(vals[i]); }
 	def r(i: int) -> Record {
 		match (vals[i]) {
 			null => return null;
@@ -868,8 +873,7 @@ def evalOp(op: Operator, args: Arguments) -> Result {
 		}
 //----------------------------------------------------------------------------
 		NullCheck => {
-			var object = args.r(0);
-			if (object == null) return args.throw(V3Exception.NullCheck, null);
+			if (Values.equal(args.vals[0], null)) return args.throw(V3Exception.NullCheck, null);
 			return Values.BOTTOM;
 		}
 		BoundsCheck => {
@@ -886,7 +890,7 @@ def evalOp(op: Operator, args: Arguments) -> Result {
 			return desc;
 		}
 		ConditionalThrow(exception) => {
-			if (Bool.unbox(args.vals[0])) return args.throw(exception, null);
+			if (V3.unboxBool(args.vals[0])) return args.throw(exception, null);
 			return Values.BOTTOM;
 		}
 //----------------------------------------------------------------------------
@@ -961,6 +965,7 @@ def evalOp(op: Operator, args: Arguments) -> Result {
 		}
 		CallVariantVirtual(method) => {
 			var object = getRecordReceiver(args);
+			if (object == null) return args.notFoldable("null variant receiver"); // only in unreachable code
 			var spec = args.getClosedIrSpec(method);
 			if (spec == null) return args.notFoldable(null);
 			spec = lookupVtable(args, object, spec);
@@ -968,6 +973,7 @@ def evalOp(op: Operator, args: Arguments) -> Result {
 		}
 		CallVariantSelector(selector) => {
 			var object = getRecordReceiver(args);
+			if (object == null) return args.notFoldable("null variant receiver"); // only in unreachable code
 			var spec = args.getClosedIrSpec(selector);
 			if (spec == null) return args.notFoldable(null);
 			spec = lookupMtable(args, object, selector.mtable, spec.typeArgs);
@@ -1056,10 +1062,13 @@ def evalOp(op: Operator, args: Arguments) -> Result {
 
 //----------------------------------------------------------------------------
 		PtrAdd => {
-			var base = args.vals[0], off = args.i(1);
+			var base = args.vals[0], loff = args.l(1), off = int.view(loff);
+			if (off != loff) return args.notFoldable("pointer offset too large");
 			if (off == 0) return base;
 			match (base) {
 				null => if (off > 0) {
+					// a null range start is index 0 of an array, not an address
+					if (op.typeArgs[0].typeCon.kind == Kind.RANGE_START) return Int.box(off);
 					var addr = Addr.new(null, null, off);
 					addr.absolute = off;
 					return addr;

@@ -56,16 +56,21 @@ class OptimizationFlags {
 		// don't skip any characters
 	}
 }
+def getOptLevelFromOptions() -> int {
+	if(CLOptions.O4.val) return 4;
+	if(CLOptions.O3.val) return 3;
+	if(CLOptions.O2.val) return 2;
+	if(CLOptions.O1.val) return 1;
+	if(CLOptions.O0.val) return 0;
+	return 1;
+}
 // A stateless representation of a compiler that is configured once at startup
 // and then can be reused to compile various programs.
 class Compiler(target: Target) {
 	def optError = ErrorGen.new(1);
 	def flags = OptimizationFlags.new(CLOptions.OPT.get(), optError);
-	def level = if(CLOptions.O3.val, 3, if(CLOptions.O2.val, 2, if(CLOptions.O1.val, 1, if(CLOptions.O0.val, 0, 1))));
-	// Whether to generate source-level debugging metadata (checkpoints) in SSA.
+	def level = getOptLevelFromOptions();
 	def DebugSymbol = CLOptions.DEBUG.get() || (dwarfEnabled() && emitsDwarf(target));
-	// Whether to additionally track local variables, their types and their
-	// locations. {-dwarf-line} asks for line numbers only.
 	def DebugVars = CLOptions.DEBUG.get() || (CLOptions.DWARF.get() && emitsDwarf(target));
 	def printSsaMatcher = CLOptions.PRINT_SSA.get();
 	def printLicmMatcher = CLOptions.PRINT_LICM.get();
@@ -74,9 +79,7 @@ class Compiler(target: Target) {
 	def printOptMatcher = CLOptions.PRINT_OPT.get();
 	def verifySsaMatcher = CLOptions.VERIFY_SSA.get();
 	def useGlobalRegAllocMatcher = if(CLOptions.DWARF.get(), VstMatcher.None, if(level >= 2, VstMatcher.All, CLOptions.USE_GLOBALREGALLOC.get()));
-	// Whether the global register allocator coalesces move-related variables. Only
-	// {-regalloc-coalesce} turns this on; it is not implied by an optimization level.
-	def RegAllocCoalesce = CLOptions.REGALLOC_COALESCE.val;
+	def RegAllocCoalesce = CLOptions.REGALLOC_COALESCE.val || level >= 4;
 	def unboxVariantsOpt = CLOptions.UNBOX_VARIANTS.get();
 	def variantUnboxMatcher = if(unboxVariantsOpt != null, GlobMatcher.new(unboxVariantsOpt));
 	var ssaMon: IrSpec -> void;
@@ -88,6 +91,7 @@ class Compiler(target: Target) {
 	var VstInit			= true;
 	var GenVariantEqual		= false;
 	var Reachability		= CLOptions.RA.get();
+	var Emit			= true;
 	var linking			= CLOptions.LINKING.get();
 	// reachability/normalization settings
 	def NormConfig			= NormalizerConfig.new();
@@ -107,14 +111,11 @@ class Compiler(target: Target) {
 	var LocalRegAlloc		= flags.get("LocalRegAlloc", level >= 1) && !CLOptions.DWARF.get();
 	var NormOptimize		= flags.get("NormOptimize", level >= 2);
 	var MachOptimize		= flags.get("MachOptimize", level >= 2);
-	var LoopInvariantCodeMotion	= flags.get("LoopInvariantCodeMotion", CLOptions.LICM.val);
+	var VstBuildOpt			= flags.get("VstBuildOpt", false);
+	var NormBuildOpt		= flags.get("NormBuildOpt", false);
+	var MachBuildOpt		= flags.get("MachBuildOpt", false);
+	var LoopInvariantCodeMotion	= flags.get("LoopInvariantCodeMotion", CLOptions.LICM.val || level >= 4);
 	var IrAlloc			= CLOptions.IR_ALLOC.get();
-	var firstEnabled		= CLOptions.FIRST_ENABLED.get();
-	var lastEnabled			= CLOptions.LAST_ENABLED.get();
-	var firstDisabled		= CLOptions.FIRST_DISABLED.get();
-	var lastDisabled		= CLOptions.LAST_DISABLED.get();
-	var optCount			= 0;  // count of optimization decision points
-	private var doOptEnabledCheck = false;
 	// XXX: flags for folding, reduction, typechecks, dead code, phi simplification
 	// XXX: implement CSE and code motion
 	// unsafe optimization settings; for performance testing only
@@ -142,33 +143,6 @@ class Compiler(target: Target) {
 
 		// target configures the compiler only once
 		if (target != null) target.configureCompiler(this);
-		doOptEnabledCheck = !(firstEnabled == CLOptions.FIRST_ENABLED.init &&
-				      lastEnabled == CLOptions.LAST_ENABLED.init &&
-				      firstDisabled == CLOptions.FIRST_DISABLED.init &&
-				      lastDisabled == CLOptions.LAST_DISABLED.init);
-	}
-
-	def optEnabledAt(count: int) -> bool {
-		if (count < firstEnabled || count > lastEnabled) return false;
-		if (count < firstDisabled || count > lastDisabled) return true;
-		return false;
-	}
-	def optEnabled(s: string, meth: IrMethod, block: SsaBlock, inst: SsaInstr) -> bool {
-		if (!doOptEnabledCheck) return true;
-		// want to identify enabled / disabled and transitions
-		var prev = optCount++;
-		var prevEnabled = optEnabledAt(prev);
-		var nowEnabled = optEnabledAt(optCount);
-		if (nowEnabled && !prevEnabled) {
-			var sb = Terminal.buf.yellow().put1("First enabled after disabled optimization #%d: ", optCount).end();
-			showPoint(sb, s, meth, block, inst);
-			sb.outln();
-		} else if (prevEnabled && !nowEnabled) {
-			var sb = Terminal.buf.yellow().put1("First disabled after enabled optimization #%d: ", optCount).end();
-			showPoint(sb, s, meth, block, inst);
-			sb.outln();
-		}
-		return nowEnabled;
 	}
 	def setLinkingModel(default: LinkingModel, supported: LinkingModel.set) {
 		if (linking == LinkingModel.NONE) return;
@@ -178,32 +152,6 @@ class Compiler(target: Target) {
 			optError.addError(null, null, "target does not support linking model", linking.opt);
 		}
 	}
-	def showPoint(sb: StringBuilder, s: string, meth: IrMethod, block: SsaBlock, inst: SsaInstr) {
-		var sep = "";
-		if (s != null && s.length > 0) {
-			sb.put1("%s", s);
-			sep = "  ";
-		}
-		if (meth != null) {
-			sb.put3("%sMethod %q.%q", sep, meth.receiver.render, meth.render);
-			sep = "  ";
-		}
-		if (block != null) {
-			sb.put2("%sBlock #%d", sep, block.uid);
-			sep = "  ";
-		}
-		if (inst != null) {
-			sb.put2("%sSsaInst #%d", sep, inst.uid);
-		}
-	}
-
-	def showOptCount() -> bool {
-		if (doOptEnabledCheck) {
-			Terminal.buf.yellow().put1("Number of optimization decision points: %d", optCount).end().outln();
-		}
-		return true;
-	}
-
 	def getOutputFileName(fileName: string, ext: string) -> string {
 		return Paths.assemble(CLOptions.OUTPUT.get(), fileName, ext);
 	}
@@ -258,8 +206,7 @@ class Compilation(compiler: Compiler, prog: Program) {
 			&& (!compiler.VstVerify || verify())
 			&& (!compiler.VstInit || init())
 			&& (!compiler.Reachability || reachability())
-			&& emit()
-			&& compiler.showOptCount()
+			&& (!compiler.Emit || emit())
 			&& prog.ERROR.noErrors;
 	}
 	def parse() -> bool {
@@ -404,6 +351,10 @@ class Compilation(compiler: Compiler, prog: Program) {
 		if (meth.ssa == null) {
 			var context = SsaContext.new(compiler, prog).enterSpec(memberRef);
 			var gen = VstSsaGen.new(context, prog.opBuilder);
+			if (compiler.VstBuildOpt) {
+				var opt = gen.opt = SsaOptimizer.new(context);
+				opt.remove_pure_ops = false; // instructions have no uses yet when added
+			}
 			gen.recordDirectCalls = compiler.InlineEarly || CLOptions.INLINE.val != VstMatcher.None;
 			var graph = gen.generate();
 			context.verify();
@@ -415,15 +366,13 @@ class Compilation(compiler: Compiler, prog: Program) {
 			}
 			if (compiler.VstControlOpt && graph.isMultiBlock()) {
 				// Perform control flow optimizations.
-				SsaCfOptimizer.new(context).optimize();
+				SsaOptimizer.new(context).optControlFlow();
 				context.printSsa("Control Optimized");
 			}
-			if (compiler.PostpassOptimize &&
-			    compiler.optEnabled("(gen)", meth, null, null)) {
+			if (compiler.PostpassOptimize) {
 				// Run the post-pass optimizer.
 				var opt = SsaOptimizer.new(context);
-				opt.iopt.optimize_loads = compiler.LoadOptimize &&
-							  compiler.optEnabled("(gen loads)", meth, null, null);
+				opt.optimize_loads = compiler.LoadOptimize;
 				opt.optGraph();
 				context.printSsa("Postpass Optimized");
 			}
@@ -432,12 +381,9 @@ class Compilation(compiler: Compiler, prog: Program) {
 		return meth.ssa;
 	}
 }
-// Returns true if any of the DWARF output options were given.
 def dwarfEnabled() -> bool {
 	return CLOptions.DWARF.get() || CLOptions.DWARF_LINE.get();
 }
-// Returns true if {target} has a backend that emits DWARF. Note that {target}
-// is null when running in the interpreter, which emits no binary at all.
 def emitsDwarf(target: Target) -> bool {
 	return target != null && target.supportsDwarf;
 }

@@ -57,9 +57,8 @@ function do_compiled() {
     R=$OUT/$target/run.out
 
     print_compiling $target
-    # HACK until wasm-gc is in stable
-    if [ "$target" = wasm-gc-wasi1 ] && [ -z "${AENEAS_TEST##*/stable/*}" ]; then
-	printf "${YELLOW}skipped${NORM}\n"
+    if ! is_known_target $target; then
+	printf "${YELLOW}skipped${NORM} (unknown target)\n"
         return
     fi
     run_v3c $target -output=$T $TESTS $LIB_FILES &> $C
@@ -76,7 +75,7 @@ function do_compiled() {
                 if [ "$short" = "run-wasm-gc-wasi1@node" ]; then
 	            $CONFIG/node --no-warnings --experimental-wasi-unstable-preview1 ../../rt/wasm-wasi1-common/wasi.node.mjs $OUT/$target/main.wasm $TESTS | tee $R | $PROGRESS
                 else
-	            $OUT/$target/main $FATAL $TESTS | tee $R | $PROGRESS
+	            $runner $OUT/$target main $FATAL $TESTS | tee $R | $PROGRESS
                 fi
             else
 	        printf "${YELLOW}skipped${NORM}\n"

@@ -67,6 +67,7 @@ def I_MOVD		= 0x76;
 def I_MOVQ		= 0x77;
 def I_SYSCALL		= 0x78;
 def I_RETTO		= 0x79;
+def I_SYSCALL_FLAGS	= 0x7A;
 def I_KILL_REGS		= 0x80;
 
 def I_QD_DIFF = I_ADDQ - I_ADDD; // Used to compute 64-bit opcode from 32-bit opcode
@@ -222,15 +223,16 @@ class SsaX86_64Gen extends SsaMachGen {
 				// TODO: handle multiple conditions for conditional throw
 				emit1(ArchInstrs.FLAG_NO_GAP | I_THROWC | encodeCond(conds.cond1), useExSource(exception, i.source));
 			}
+			NullCheck => {
+				if (!V3Op.needsNullCheck(i, i.input0())) return;
+				useMrrsd(i.input0(), null, 1, null);
+				useInt(0);
+				useExSource(V3Exception.NullCheck, i.source);
+				return emitN(I_TESTQ | (AM_MRRSD_IMM << AM_SHIFT));
+			}
 			PtrLoad => {
 				var lt = i.op.typeArgs[1], size = mach.sizeOf(lt);
 				var t = matchMrrsd(i.input0());
-				if (size == 0) {
-					useMrrsd(t);
-					useInt(0);
-					if (!i.facts.O_NO_NULL_CHECK) useExSource(V3Exception.NullCheck, i.source);
-					return emitN(I_TESTQ | (AM_MRRSD_IMM << AM_SHIFT));
-				}
 				var opcode: int;
 				match (size) {
 					1 => opcode = if(V3.isSigned(lt), I_MOVBSX, I_MOVBZX) | (AM_REG_MRRSD << AM_SHIFT);
@@ -257,7 +259,6 @@ class SsaX86_64Gen extends SsaMachGen {
 				if (tryUseImm32(y)) {
 					// store of constant to memory; ignore floating point if imm32
 					match (size) {
-						0 => opcode = I_TESTQ;
 						1 => opcode = I_MOVB;
 						2 => opcode = I_MOVW;
 						4 => opcode = I_MOVD;
@@ -267,7 +268,6 @@ class SsaX86_64Gen extends SsaMachGen {
 					opcode |= (AM_MRRSD_IMM << AM_SHIFT);
 				} else {
 					match (size) {
-						0 => opcode = I_TESTQ | (AM_MRRSD_REG << AM_SHIFT);
 						1 => opcode = I_MOVB | (AM_MRRSD_REG << AM_SHIFT);
 						2 => opcode = I_MOVW | (AM_MRRSD_REG << AM_SHIFT);
 						4 => opcode = if(FloatType.?(lt),
@@ -579,7 +579,7 @@ class SsaX86_64Gen extends SsaMachGen {
 		// define the return value(s) of the call
 		for (i < rv.length) {
 			var r = rv[i];
-			if (r != null) dfnFixed(r, X86_64Common.KERNEL_RETURN_REGS[i]); // TODO: eflags?
+			if (r != null) dfnFixed(r, X86_64Common.KERNEL_RETURN_REGS[i]);
 		}
 		kill(Regs.ALL);
 		// use the arguments to the call
@@ -587,7 +587,9 @@ class SsaX86_64Gen extends SsaMachGen {
 		for (i < inputs.length) {
 			useFixed(inputs[i].dest, X86_64Common.KERNEL_PARAM_REGS[i]);
 		}
-		emitN(I_SYSCALL);
+		// the Darwin kernel returns a third result, the flags, if it is used
+		var flags = kernel == Kernel.DARWIN && rv.length > 2 && rv[2] != null;
+		emitN(if(flags, I_SYSCALL_FLAGS, I_SYSCALL));
 	}
 	def emitReturnTo(i: SsaApplyOp) {
 		var rtypes = Tuple.toTypeArray(i.op.typeArgs[0]);
@@ -1215,10 +1217,10 @@ class SsaX86_64Gen extends SsaMachGen {
 			I_MOVB => asm.movb_m_r(a, b);
 			I_MOVW => asm.movw_m_r(a, b);
 
-			I_CMPXCHG8 => asm.cmpxchgb_m_r(a, b);
-			I_CMPXCHG16 => asm.cmpxchgw_m_r(a, b);
-			I_CMPXCHG32 => asm.d.cmpxchg_m_r(a, b);
-			I_CMPXCHG64 => asm.cmpxchg_m_r(a, b);
+			I_CMPXCHG8 => asm.lock().cmpxchgb_m_r(a, b);
+			I_CMPXCHG16 => asm.lock().cmpxchgw_m_r(a, b);
+			I_CMPXCHG32 => asm.lock().d.cmpxchg_m_r(a, b);
+			I_CMPXCHG64 => asm.lock().cmpxchg_m_r(a, b);
 			_ => return invalidOpcode(opcode);
 		}
 	}
@@ -1327,6 +1329,11 @@ class SsaX86_64Gen extends SsaMachGen {
 				x: Addr => {
 					asm.movq_r_l(a, 0x1010101020202020L);
 					asm.recordAbs64(asm.w.pos - 8, X86_64AddrRef.new(null, null, 0, x, false));
+					return;
+				}
+				x: Record => {
+					asm.movq_r_l(a, 0x1010101020202020L);
+					asm.recordAbs64(asm.w.pos - 8, X86_64AddrRef.new(null, null, 0, mach.addrOfRecord(x), false));
 					return;
 				}
 			}
@@ -1491,6 +1498,11 @@ class SsaX86_64Gen extends SsaMachGen {
 			I_SYSCALL => {
 				asm.syscall();
 			}
+			I_SYSCALL_FLAGS => {
+				asm.syscall();
+				asm.pushfq();
+				asm.popq_r(X86_64Regs.RCX);
+			}
 			I_RETTO => {
 				asm.movq_r_r(X86_64Regs.RSP, X86_64Regs.RBX);
 				asm.ret();
@@ -1538,6 +1550,7 @@ class SsaX86_64Gen extends SsaMachGen {
 			x: Box<int> 		=> b = x.val;
 			x: Box<long> 		=> b = int.view(x.val);
 			x: Addr 		=> b = ABS_MARKER;
+			x: Record 		=> b = ABS_MARKER;
 			x: Box<bool> 		=> b = if(x.val, 1);
 			x: Float32Val 		=> b = int.view(x.bits);
 			x: Float64Val 		=> b = int.view(x.bits);
@@ -1729,10 +1742,10 @@ class X86InstrBuffer extends ArchInstrBuffer {
 			I_MOVW => name = "movw";
 			I_MOVWSX => name = "movwsx";
 			I_MOVWZX => name = "movwzx";
-			I_CMPXCHG8 => name = "cmpxchgb";
-			I_CMPXCHG16 => name = "cmpxchgw";
-			I_CMPXCHG32 => name = "cmpxchgd";
-			I_CMPXCHG64 => name = "cmpxchgq";
+			I_CMPXCHG8 => name = "lock cmpxchgb";
+			I_CMPXCHG16 => name = "lock cmpxchgw";
+			I_CMPXCHG32 => name = "lock cmpxchgd";
+			I_CMPXCHG64 => name = "lock cmpxchgq";
 			I_INCQ => name = "incq";
 			I_DECQ => name = "decq";
 			I_SHLQ => name = "shlq";
@@ -1790,6 +1803,7 @@ class X86InstrBuffer extends ArchInstrBuffer {
 				return indent;
 			}
 			I_SYSCALL => name = "syscall";
+			I_SYSCALL_FLAGS => name = "syscall.flags";
 			I_RETTO => name = ".retto";
 			I_KILL_REGS => name = ".kill";
 			_ => {

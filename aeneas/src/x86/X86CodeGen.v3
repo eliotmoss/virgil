@@ -241,6 +241,7 @@ class X86CodeGen extends OldCodeGen {
 				i.mark = context.graph.markGen + makeVar(i.input0()).varNum + index;
 			}
 			ConditionalThrow(exception) =>	root = genCondThrow(i, v, exception);
+			NullCheck =>		root = genNullCheck(i);
 			PtrLoad =>		root = genLoad(i, v);
 			PtrStore =>		root = genStore(i, v);
 			PtrCmpSwp =>		root = genCmpSwp(i, v);
@@ -527,6 +528,18 @@ class X86CodeGen extends OldCodeGen {
 		}
 		return genLoadAddr(i, v, ptr.dest, 1, 0);
 	}
+	def genNullCheck(i: SsaApplyOp) -> bool {
+		var x = i.input0();
+		if (!V3Op.needsNullCheck(i, x)) return false;
+		if (SsaConst.?(x)) {
+			var addr = Addr.!(val(x));
+			if (addr != null && !addr.equals(null)) return false; // valid address
+			gen("throw_null", asm_throw, (i.source, V3Exception.NullCheck));
+			return true;
+		}
+		gen("test_i", asm_test_i, (gpr(x), byte.view(1), 0, 0, true, i.source));
+		return true;
+	}
 	def genLoadAddr(i: SsaApplyOp, v: VReg, x: SsaInstr, scale: byte, disp: int) -> bool {
 		var t = i.op.typeArgs[1];
 		var nullCheck = V3Op.needsNullCheck(i, x);
@@ -571,9 +584,9 @@ class X86CodeGen extends OldCodeGen {
 		if (SsaConst.?(ptr.dest)) {
 			// cmpswp to absolute address
 			var addr = Addr.!(this.val(ptr.dest));
-			if (size == 4) gen("stored_abs", asm_cmpswpx_abs, (X86Assembler.cmpxchngd, dest, addr, gpr(val)));
-			else if (size == 1) gen("storeb_abs", asm_cmpswpx_abs, (X86Assembler.cmpxchngb, dest, addr, byt(val)));
-			else if (size == 2) gen("storew_abs", asm_cmpswpx_abs, (X86Assembler.cmpxchngw, dest, addr, gpr(val)));
+			if (size == 4) gen("cmpxchngd_abs", asm_cmpswpx_abs, (X86Assembler.cmpxchngd, dest, addr, gpr(val)));
+			else if (size == 1) gen("cmpxchngb_abs", asm_cmpswpx_abs, (X86Assembler.cmpxchngb, dest, addr, byt(val)));
+			else if (size == 2) gen("cmpxchngw_abs", asm_cmpswpx_abs, (X86Assembler.cmpxchngw, dest, addr, gpr(val)));
 			else context.fail("invalid size for cmpswp");
 			return true;
 		}
@@ -590,9 +603,9 @@ class X86CodeGen extends OldCodeGen {
 			}
 		}
 		var canTrap = V3Op.needsNullCheck(i, base);
-		if (size == 4) gen("cmpswpd", asm_cmpswpx, (X86Assembler.cmpxchngd, dest, gpr(base), scale, disp, gpr(val), canTrap, i.source));
-		else if (size == 1) gen("cmpswpb", asm_cmpswpx, (X86Assembler.cmpxchngb, dest, gpr(base), scale, disp, byt(val), canTrap, i.source));
-		else if (size == 2) gen("cmpswpw", asm_cmpswpx, (X86Assembler.cmpxchngw, dest, gpr(base), scale, disp, gpr(val), canTrap, i.source));
+		if (size == 4) gen("cmpxchngd", asm_cmpswpx, (X86Assembler.cmpxchngd, dest, gpr(base), scale, disp, gpr(val), canTrap, i.source));
+		else if (size == 1) gen("cmpxchngb", asm_cmpswpx, (X86Assembler.cmpxchngb, dest, gpr(base), scale, disp, byt(val), canTrap, i.source));
+		else if (size == 2) gen("cmpxchngw", asm_cmpswpx, (X86Assembler.cmpxchngw, dest, gpr(base), scale, disp, gpr(val), canTrap, i.source));
 		else context.fail("invalid size for cmpswp");
 		return true;
 	}
@@ -912,13 +925,7 @@ class X86CodeGen extends OldCodeGen {
 
 	// ---------- Loads ----------------------------------------------
 	def gen_loadx(dest: VReg, t: Type, base: SsaInstr, scale: byte, disp: int, canTrap: bool, source: Source) {
-		var size = mach.sizeOf(t);
-		if (size == 0) {
-			// load produces no value; only needed for possible nullcheck
-			gen("test_i", asm_test_i, (gpr(base), scale, disp, 0, canTrap, source));
-			return;
-		}
-		var lt = matchLoad(t, size);
+		var lt = matchLoad(t, mach.sizeOf(t));
 		gen(lt.0, asm_loadx, (lt.1, dfngpr(dest), gpr(base), scale, disp, canTrap, source));
 	}
 	def gen_loada(dest: VReg, t: Type, addr: Addr) {
@@ -990,7 +997,6 @@ class X86CodeGen extends OldCodeGen {
 	def gen_storex(size: int, base: SsaInstr, scale: byte, disp: int, val: SsaInstr, canTrap: bool, source: Source) {
 		if (size == 4) gen("stored", asm_storex, (X86Assembler.movd_rm_r, gpr(base), scale, disp, gpr(val), canTrap, source));
 		else if (size == 1) gen("storeb", asm_storex, (X86Assembler.movb_rm_r, gpr(base), scale, disp, byt(val), canTrap, source));
-		else if (size == 0) gen("test_i", asm_test_i, (gpr(base), scale, disp, 0, canTrap, source));
 		else if (size == 2) gen("storew", asm_storex, (X86Assembler.movw_rm_r, gpr(base), scale, disp, gpr(val), canTrap, source));
 		else context.fail("invalid size for store");
 	}
@@ -1001,7 +1007,6 @@ class X86CodeGen extends OldCodeGen {
 	def gen_storex_i(size: int, base: SsaInstr, scale: byte, disp: int, val: int, canTrap: bool, source: Source) -> bool {
 		if (size == 4) gen("stored_i", asm_storex_i, (X86Assembler.movd_rm_i, gpr(base), scale, disp, val, canTrap, source));
 		else if (size == 1) gen("storeb_i", asm_storex_i, (X86Assembler.movb_rm_i, gpr(base), scale, disp, val, canTrap, source));
-		else if (size == 0) gen("test_i", asm_test_i, (gpr(base), scale, disp, 0, canTrap, source));
 		else if (size == 2) gen("storew_i", asm_storex_i, (X86Assembler.movw_rm_i, gpr(base), scale, disp, val, canTrap, source));
 		else context.fail("invalid size for store");
 		return true;
@@ -1018,6 +1023,7 @@ class X86CodeGen extends OldCodeGen {
 	}
 	def asm_cmpswpx(m: (X86Assembler, X86Rm, X86Reg) -> void, dest: int, base: int, scale: byte, disp: int, val: int, canTrap: bool, source: Source) {
 		var off = asm.codeOffset();
+		asm.lock();
 		m(asm, X86Addr.new(null, r(base), scale, disp), r(val));
 		var reg = r(dest);
 		asm.setz(reg);
@@ -1046,6 +1052,7 @@ class X86CodeGen extends OldCodeGen {
 	}
 	def asm_cmpswpx_abs(m: (X86Assembler, X86Rm, X86Reg) -> void, dest: int, addr: Addr, val: int) {
 		var pos = asm.pos();
+		asm.lock();
 		m(asm, X86Addrs.ABS_PATCH, r(val));
 		var reg = r(dest);
 		asm.setz(reg);
@@ -1530,7 +1537,7 @@ class X86CodeGen extends OldCodeGen {
 		asm.ijmp(scratchReg);
 		// align and emit the jump table
 		asm.w.align(4);
-		var jumpTableAddr = int.!(asm.machBuffer.addr());
+		var jumpTableAddr = int.view(u32.!(asm.machBuffer.addr()));
 		asm.w.at(jtaddrpos).put_b32(jumpTableAddr);
 		asm.w.atEnd();
 		// emit jump table

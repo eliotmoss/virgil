@@ -14,7 +14,7 @@ class LinuxTarget extends Target {
 	def elf_machine: u8;
 
 	new(name: string, space, intNorm, machLoweringConfig, newBackend, getExtCallConv, elf_machine, kernelCallReturnType) super(name) {
-		if (space.addressWidth == 64) refPatterns = ScalarPatterns.TAGGED_PTR_64;
+		if (space.addressWidth == 64) refPatterns = ScalarPatterns.TAGGED_PTR_64_LOWER; // XXX: use upper tag bits too
 		else refPatterns = ScalarPatterns.TAGGED_PTR_32;
 	}
 
@@ -28,7 +28,8 @@ class LinuxTarget extends Target {
 		compiler.NormConfig.MaxScalarWidth = intNorm.width;
 		compiler.NormConfig.GetScalar = getScalar;
 		compiler.NormConfig.GetBitWidth = getBitWidth;
-		var mod: LinkingModel = if(Debug.UNSTABLE, LinkingModel.SYSV, LinkingModel.NONE);
+		if (CLOptions.RT_TAGGED_REFS.get()) compiler.NormConfig.RefPatterns = refPatterns;
+		var mod: LinkingModel = if(Version.UNSTABLE, LinkingModel.SYSV, LinkingModel.NONE);
 		compiler.setLinkingModel(mod, mod | LinkingModel.NONE);
 	}
 	private def getScalar(compiler: Compiler, prog: Program, t: Type) -> Scalar.set {
@@ -36,12 +37,16 @@ class LinuxTarget extends Target {
 			match (t) {
 				x: FloatType => return if(x.is64, Scalar.F64 | Scalar.B64, Scalar.F32 | Scalar.B32);
 				x: PrimType => return if(x.width <= 32, Scalar.B32 | Scalar.B64, Scalar.B64); // XXX: Scalar.R64, once packed refs
+				x: FuncType => return Scalar.Func;
+				x: AnyFuncType => return Scalar.Func;
 				_ => return Scalar.R32;
 			}
 		} else {
 			match (t) {
 				x: FloatType => return Scalar.F64 | Scalar.B64;
 				x: PrimType => return Scalar.B64; // XXX: Scalar.R64, once packed refs
+				x: FuncType => return Scalar.Func;
+				x: AnyFuncType => return Scalar.Func;
 				_ => return Scalar.R64;
 			}
 		}
@@ -121,16 +126,16 @@ class LinuxTarget extends Target {
 		// ex segment for trapping explicit checks
 		var ex = if(rt.src != null, elf.addProgramHeader());
 
+		// segment for the runtime code region, if any
+		var runtimeCodeSize = long.!(pageAlign.alignUp_u64(CLOptions.RUNTIME_CODE_SIZE.get())); // runtime code region size
+		var rtexe = if(runtimeCodeSize > 0, elf.addProgramHeader());
+
 		// fill out the data section
 		var data = elf.addProgramHeader();
 		data.p_type = ElfPhType.PT_LOAD;
 		data.p_filesz = pageAlign.size;
 		data.p_memsz = pageAlign.size;
 		data.p_flags = ElfConst.PF_RW;
-
-		// reserve a region for runtime code if necessary.
-		var runtimeCodeSize = long.!(pageAlign.alignUp_u64(CLOptions.RUNTIME_CODE_SIZE.get())); // runtime code region size
-		var rtexe = if(runtimeCodeSize > 0, elf.addProgramHeader());
 
 		// skip over ELF header
 		w.skipN(int.!(elf.size()));
@@ -145,21 +150,6 @@ class LinuxTarget extends Target {
 		rt.recordCodeEnd(w.addr_end());
 
 		mach.reserveRuntimeCode(w); // TODO: add .reserved_code symbol
-
-		if (rtexe != null) {
-			// TODO: add .runtime_code symbol
-			var startAddr = pageAlign.alignUp_i64(w.addr_end());
-			rt.recordRuntimeCode(startAddr, runtimeCodeSize);
-			rtexe.p_type = ElfPhType.PT_LOAD;
-			rtexe.p_filesz = 1; // file size cannot be zero, apparently
-			rtexe.p_vaddr = startAddr;
-			rtexe.p_memsz = runtimeCodeSize;
-			rtexe.p_flags = ElfConst.PF_RWX;
-			w.skipN(1);
-			w.skipAddr(runtimeCodeSize);
-		} else {
-			rt.recordRuntimeCode(0, 0);
-		}
 
 		// Build list of addresses of imported functions, for replacing references
 		// to their Unimplemented stubs.  This is done here so that all later
@@ -195,6 +185,23 @@ class LinuxTarget extends Target {
 			ex.p_offset = 0;
 		}
 
+		// generate the RWX runtime code region after the code segment and metadata
+		if (rtexe != null) {
+			// TODO: add .runtime_code symbol
+			w.skipPage();
+			var startAddr = w.endPageAddr();
+			rt.recordRuntimeCode(startAddr, runtimeCodeSize);
+			rtexe.p_type = ElfPhType.PT_LOAD;
+			rtexe.p_offset = 0;
+			rtexe.p_filesz = 1; // file size cannot be zero, apparently
+			rtexe.p_vaddr = startAddr;
+			rtexe.p_memsz = runtimeCodeSize;
+			rtexe.p_flags = ElfConst.PF_RWX;
+			w.skipAddr(runtimeCodeSize);
+		} else {
+			rt.recordRuntimeCode(0, 0);
+		}
+
 		// emit data
 		w.skipPage();
 		w.atEnd().align(mach.data.addressSize);
@@ -206,9 +213,16 @@ class LinuxTarget extends Target {
 		data.p_memsz = pageAlign.alignUp_i64(data.p_filesz + rt.heapSize + rt.shadowStackSize);
 
 		// Verify that the finished layout fits, rather than failing while patching addresses.
-		if (mach.codeRegion.refSize == 4 && (data.p_vaddr + data.p_memsz) > 0x7FFFFFFF) {
+		// 32-bit targets can use the whole 4GB; 64-bit targets with 4-byte code refs sign-extend them.
+		var image_end = data.p_vaddr + data.p_memsz;
+		if (mach.data.addressSize == 4 && image_end > 0xFFFFFFFFL) {
 			prog.ERROR.addError(null, null, "Configuration error",
-				Strings.format1("program image does not fit below 2GB; it ends at %d", data.p_vaddr + data.p_memsz));
+				Strings.format1("program image does not fit below 4GB; it ends at %d", image_end));
+			return;
+		}
+		if (mach.data.addressSize > 4 && mach.codeRegion.refSize == 4 && image_end > 0x7FFFFFFF) {
+			prog.ERROR.addError(null, null, "Configuration error",
+				Strings.format1("program image does not fit below 2GB; it ends at %d", image_end));
 			return;
 		}
 
@@ -360,7 +374,6 @@ enum DebugSection(printName: string) {
 	line(".debug_line\x00"),
 	frame(".debug_frame\x00"),
 }
-def DebugSectionCount = 7;
 
 class ElfSections(elf: ElfHeader, haveExports: bool, haveImports: bool, debugSymbol: bool) {
 	def SHN_ABS: u16 = 0xFFF1;
@@ -369,13 +382,11 @@ class ElfSections(elf: ElfHeader, haveExports: bool, haveImports: bool, debugSym
 	def sym = ElfSectionHeader.new();
 	def text = ElfSectionHeader.new();
 	def data = ElfSectionHeader.new();
-	def debugs = Array<ElfSectionHeader>.new(DebugSectionCount);
+	def debugs = Array<ElfSectionHeader>.new(DebugSection.count);
 	def symbols = Vector<ElfSymbol>.new();
 	def relocatable = haveExports | haveImports;
 	var text_relocs: ElfSectionHeader;
 	var data_relocs: ElfSectionHeader;
-	// an entry is (offset, symbol index, reloc type, addend, position in writer)
-	// these are encoded for 32- and 64-bit as a last step
 	def text_reloc_entries = Vector<ElfReloc>.new();
 	def data_reloc_entries = Vector<ElfReloc>.new();
 	var str_start: int;

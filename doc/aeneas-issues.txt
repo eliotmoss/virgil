@@ -5,7 +5,7 @@ ______ ______ __   _ ______ ______ ______    _____ ______ ______ _    _ ______ _
 -- general usability issues -------
   migrate "aeneas" script to general "virgil" script
   virgil compile <target> [options] files
-    virgil run [options] files
+    virgil run [options] v3-files [--] args
     virgil build <target> file
     v3c is an alias for "virgil compile"
     v3i is an alias for "virgil run"
@@ -13,7 +13,7 @@ ______ ______ __   _ ______ ______ ______    _____ ______ ______ _    _ ______ _
     v3c <target> is shorthand for {virgil compile -target=target ...}
 
 -- vdb usability issues -------
-  Tab completion for file names
+* Tab completion for file names
   Allow short file names
   Better help for command errors (e.g. break)
   Skip whitespace in commands properly
@@ -22,28 +22,39 @@ ______ ______ __   _ ______ ______ ______    _____ ______ ______ _    _ ______ _
   Empty command should repeat previous
   Should be able to show SSA display and have moving cursor
   Feed back to emacs to have highlighted line in buffer
-  Crash in "info locals"
+* Crash in "info locals"
   Inspect object by record number
-  locals information seems wrong
+* locals information seems wrong
+
+-- port short list -----------
+  POWER (ppc64le, ELFv2)
+  IBM Z (s390x)
+  LoongArch64
+  Thumb-2 (ARMv7-M / ARMv7-A)
+  RISC-V 32 (rv32imafdc)
+  AVR
+  AVR32
+  68K
+  6502
 
 -- bugs -------------
   polymorphic recursion
   type inference imprecisions
-  -heap-size=3g
+  pass CI with -O0
 -- migrations -------
   use range type whereever it makes sense
 
 -- priority (primarily for Wizard) -----
   static linking (relocatable .o files)
-  arm64 port
   enable TypeSystem.computeCast
   unbox and pack variants
   canonicalize equivalent variant records
   threads
-  runtime optimization of descriptors
+  descriptor extensions with more than 31 words
 
 -- aeneas sucks -----
   names for synthesized functions (e.g. Class.==, byte.!<int>)
+  operators for AnyRef, or as members .upper_tag .lower_tag, Pointer.view?
   Do in-place specialization and normalization
   finish moving IntNormalizer into reachability/norm phase instead of mach lowering
     (PARTIAL: IntNormalizers component now lives in ir/Reachability.v3, but
@@ -75,7 +86,9 @@ ______ ______ __   _ ______ ______ ______    _____ ______ ______ _    _ ______ _
   turn on read-only arrays and ranges (without variance?)
   Reachability utilities for traversing class hierarchies (e.g. assign field indexes)
   improve DCE tool to ignore component new methods and methods run at init time
+  #inline-fast-path and #fast-path annotations support
 -- language usability sucks -------
+  Enum.view source operator
   match as an expression
   allow viewing Enum.set as integer type and vice-versa and/or add .bits
   allow arbitrarily large iN and uN integer types
@@ -107,6 +120,7 @@ ______ ______ __   _ ______ ______ ______    _____ ______ ______ _    _ ______ _
   -target=wasm-js -multiple binaries depend on order of files
   add CI runner for test/bootstrap
 -- todo -------
+  Disable runtime allocation (fixed heap, no allocation, no GC)
   Echo diffs when running on CI, to avoid needing to upload artifact
   Set -shadow-stack-size=128k for wasm targets
   wasi target
@@ -121,10 +135,16 @@ ______ ______ __   _ ______ ______ ______    _____ ______ ______ _    _ ______ _
   better error messages for type errors in array literals
   error messages for comparing with out-of-range integer literals
   generate self-executing JAR (shell script with JAR appended)
-  debugger: allow fuzzy match of files / line
   immutable arrays
   32-bit relative jump tables
 -- done -------
+* arm64-linux port
+* debugger: allow fuzzy match of files / line
+* debugger: line editing, history, and tab completion in bin/v3db
+* debugger: function breakpoints, tbreak/delete, frames, print, list source
+* Enum.set.view source operator
+* runtime optimization of descriptors
+* -heap-size=3g
 * add EnumSetViewI operator; fix iN.unpack<E.set> in a wider container
 * document int.pack and int.unpack operators (doc/tutorial/Packing.md)
 * reject variants with cases in iN.pack/unpack (PackingUtils.flatPackingWidth)

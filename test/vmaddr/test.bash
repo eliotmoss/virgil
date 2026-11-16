@@ -26,10 +26,46 @@ ADDRS_48="0x100000000 0x200000000 0x333330000 0x4400044000 0x555500000000"
 HEAP_SIZES_32=${HEAP_SIZES_32:="1m 1000m 1900m"}
 # Wizard's JVM target caps a wasm memory at 30000 pages (1875MB), so stay below that.
 HEAP_SIZES_WASM=${HEAP_SIZES_WASM:="1m 1000m 1800m"}
-HEAP_SIZES_48=${HEAP_SIZES_48:="1m 3g 5g 12g 17000m"}
+HEAP_SIZES_48=${HEAP_SIZES_48:="1m 3g 5g 12g 15000m"}
 # Start addresses to combine with the heap sizes above.
-HEAP_ADDRS_32=${HEAP_ADDRS_32:="0x00300000"}
+HEAP_ADDRS_32=${HEAP_ADDRS_32:="0x00300000 0x7FFF0000"}
 HEAP_ADDRS_48=${HEAP_ADDRS_48:="0x00300000 0x100000000"}
+
+# Rosetta, which emulates x86-64 in docker on an arm64 host, touches every page of
+# the heap as it loads a program, so there the heap has to fit in the memory of the
+# docker VM, with some to spare. Prints the largest usable heap in megabytes, if limited.
+function get_max_heap_mb() {
+    local runners=$(cd $CONFIG && echo test-$target*)
+    if [[ "$target" != x86-64-linux || "$runners" != "test-$target@docker" ]]; then
+	return
+    fi
+    local info=$($CONFIG/docker info --format '{{.Architecture}} {{.MemTotal}}' 2> /dev/null)
+    if [[ "$info" = aarch64* ]]; then
+	echo $(( ${info#* } / 1048576 - 2048 ))
+    fi
+}
+
+# Removes the heap sizes that are too large for the target from $HEAPS.
+function limit_heap_sizes() {
+    local max=$(get_max_heap_mb)
+    if [ -z "$max" ]; then
+	return
+    fi
+    local fit=""
+    for heap in $HEAPS; do
+	local mb=${heap%[mg]}
+	if [[ "$heap" = *g ]]; then
+	    mb=$(($mb * 1024))
+	fi
+	if [ "$mb" -le "$max" ]; then
+	    fit="$fit $heap"
+	else
+	    print_status "  skipped" "$target -heap-size=$heap"
+	    printf "${YELLOW}larger than the ${max}m usable in docker${NORM}\n"
+	fi
+    done
+    HEAPS="$fit"
+}
 
 HEAP_TEST_LIST=$(ls $TEST_LIST | grep '^heap_')
 ADDR_TEST_LIST=$(ls $TEST_LIST | grep -v '^heap_')
@@ -84,6 +120,8 @@ for target in $TEST_TARGETS; do
     esac
 
     if [ -z "$TESTS" ]; then continue; fi
+
+    limit_heap_sizes
 
     for addr in $ADDRS; do
 	for heap in $HEAPS; do

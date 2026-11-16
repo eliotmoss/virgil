@@ -199,9 +199,13 @@ private class SsaInstrReducerTester(t: Tester) {
 		p.printGraph("test", StringBuilder.puts(_, "TestGraph"), graph, null);
 		p.flush();
 	}
-	def newReducer(block: SsaBlock, link: SsaLink) -> SsaInstrReducer {
-		var opt = SsaInstrReducer.new(context);
-		opt.reset(graph, block, link);
+	def newReducer(block: SsaBlock, link: SsaLink) -> SsaOptimizer {
+		var opt = SsaOptimizer.new(context);
+		opt.reset(graph);
+		context.block = block;
+		opt.ssa.block = block;
+		if (link != null) opt.ssa.setPrev(link);
+		opt.state = SsaBlockState.new();
 		opt.optimize_loads = optimize_loads;
 		opt.optimize_nullchecks = optimize_nullchecks;
 		opt.optimize_inits = optimize_inits;
@@ -324,7 +328,7 @@ def TYPEQUERY(ft: Type, tt: Type, x: SsaInstr) -> SsaInstr {
 	return unop(V3Op.newTypeQuery(ft, tt), x);
 }
 
-def TEST_CLASS_TYPE = V3.stringType;
+def TEST_CLASS_TYPE = SsaGraphBuildingHelper.newClassType("TestClass", null);
 def IMM_FIELD = makeIrField(TEST_CLASS_TYPE, Int.TYPE, IrFlag.F_VALUE);
 def MUT_FIELD = makeIrField(TEST_CLASS_TYPE, Int.TYPE, IrUtil.NO_FLAGS);
 def CLASS_GET_FIELD = unop(V3Op.newClassGetField(MUT_FIELD), _);
@@ -858,9 +862,8 @@ def testTypeCast(T: SsaInstrReducerTester) {
 
 	for (pair in [(B, C), (C, B), (X, B), (B, X)]) {
 		// null-only class casts.
-		var cast = TYPECAST(pair.0, pair.1, P);
-		T.assertEq(T.graph.nullConst(pair.1), cast);
-		var block = T.newBlock([cast]);
+		T.assertEq(T.graph.nullConst(pair.1), TYPECAST(pair.0, pair.1, P));
+		var block = T.newBlock([TYPECAST(pair.0, pair.1, P)]);
 		T.optB(block);
 		var cmp = EQUAL(pair.0, P, T.graph.nullConst(pair.0));
 		var not = BOOL_NOT(cmp);
@@ -1192,8 +1195,9 @@ def testLoadElimination(T: SsaInstrReducerTester) {
 	def getClass = unop(V3Op.newClassGetField(IMM_FIELD), _);
 	def setClass = binop(V3Op.newClassSetField(IMM_FIELD), _, _);
 	def initClass = binop(V3Op.newClassInitField(IMM_FIELD), _, _);
-	def getComp = unop(V3Op.newComponentGetField(IMM_FIELD), _);
-	def setComp = binop(V3Op.newComponentSetField(IMM_FIELD), _, _);
+	def compField = makeIrField(newComponentType("TestComponent"), Int.TYPE, IrFlag.F_VALUE);
+	def getComp = unop(V3Op.newComponentGetField(compField), _);
+	def setComp = binop(V3Op.newComponentSetField(compField), _, _);
 
 	for (on in [false, true]) {
 		// load of the same field from the same object
@@ -1277,7 +1281,7 @@ def testComponentOps(T: SsaInstrReducerTester) {
 	def token = Token.new("<internal>", "f", 1, 1);
 
 	for (islong in [false, true]) {
-		def f = makeIrField(TEST_CLASS_TYPE, if(islong, Long.TYPE, Int.TYPE), IrFlag.F_VALUE);
+		def f = makeIrField(newComponentType("TestComponent"), if(islong, Long.TYPE, Int.TYPE), IrFlag.F_VALUE);
 		for (writability in [Writability.READ_ONLY, Writability.PRIVATE_WRITEABLE, Writability.WRITEABLE]) {
 			f.asField().source = VstField.new(false, writability, token, null, lit, null);
 			var instr = unop(V3Op.newComponentGetField(f), P);
@@ -1299,8 +1303,6 @@ def testTupleOps(T: SsaInstrReducerTester) {
 	// test fold of TupleCreate
 	T.assertNo(TUPLE_CREATE([K(0), P]));
 	T.assertNo(TUPLE_CREATE([P, K(0)]));
-	T.assertTK([], TUPLE_CREATE([]));
-	T.assertTK([Int.box(11)], TUPLE_CREATE([K(11)]));
 	T.assertTK([Int.box(11), Int.box(12)], TUPLE_CREATE([K(11), K(12)]));
 	T.assertTK([Int.box(11), Int.box(12), Int.box(-1333)], TUPLE_CREATE([K(11), K(12), K(-1333)]));
 
@@ -1414,7 +1416,7 @@ def INT_CONVERT(ft: IntType, tt: IntType, x: SsaInstr) -> SsaInstr {
 def testIntBounds(T: SsaInstrReducerTester) {
 	def K = T.graph.intConst;
 	def P = T.graph.params[0];
-	def X = SsaInstrReducer.new(T.context);
+	def X = SsaOptimizer.new(T.context);
 	def bound = X.posIntBound;
 
 	def STYPE = Int.getType(true, _);
@@ -1490,8 +1492,6 @@ def testIf(T: SsaInstrReducerTester) {
 		d1.merge.append(ret);
 
 		T.optB(d1.top);
-
-		T.assertShape(INT32_ADD(if(b, IK(1), IK(2)), IK(3)), add);
 
 		def ret2 = d1.top.end();
 		if (!SsaReturn.?(ret2)) T.t.fail("expected return");

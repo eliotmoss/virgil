@@ -202,6 +202,7 @@ component Opcodes {
 		var F = Fact.O_FOLDABLE;
 		var P = Fact.O_PURE | Fact.O_FOLDABLE; // pure => foldable
 		var C = Fact.O_COMMUTATIVE;
+		var R = Fact.O_REMOVABLE;
 		// var A = Fact.O_ASSOCIATIVE;	// not exploited
 		var A = Facts.NONE;	// for now, since needed the bit
 		var NZ   = Fact.V_NON_ZERO;
@@ -291,7 +292,6 @@ component Opcodes {
 		t[Opcode.NormRangeGetElemElem.tag] = 	NONE;
 		t[Opcode.NormRangeSetElem.tag] = 	NONE;
 		t[Opcode.NormRangeSetElemElem.tag] = 	NONE;
-		t[Opcode.PtrAddRangeStart.tag] =	P;
 		t[Opcode.ForgeRange.tag] =		P;
 
 		t[Opcode.Init.tag] = 			NONE;
@@ -337,7 +337,7 @@ component Opcodes {
 
 		t[Opcode.SystemCall.tag] = 		NONE;
 
-		t[Opcode.PtrAdd.tag] =			P; // XXX: could be foldable with offset
+		t[Opcode.PtrAdd.tag] =			F|R;
 		t[Opcode.PtrSub.tag] =			P;
 		t[Opcode.PtrLt.tag] =			P;
 		t[Opcode.PtrLteq.tag] =			P;
@@ -352,7 +352,7 @@ component Opcodes {
 		t[Opcode.PtrAtUnboxedComponentField.tag] =	P;
 		t[Opcode.PtrLoad.tag] =			NONE;
 		t[Opcode.PtrStore.tag] =		NONE;
-		t[Opcode.PtrAddRangeStart.tag] =	P;
+		t[Opcode.PtrAddRangeStart.tag] =	F|R;
 
 		t[Opcode.CallerIp.tag] =		P;
 		t[Opcode.CallerSp.tag] =		P;

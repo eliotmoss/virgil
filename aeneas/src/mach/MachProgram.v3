@@ -51,8 +51,7 @@ class MachProgram extends TargetProgram {
 		var methods = prog.ir.methods;
 		for (i < methods.length) {
 			lowering.doMethod(methods[i]);
-			if (compiler.MachOptimize &&
-			    compiler.optEnabled("(mach)", methods[i], null, null)) {
+			if (compiler.MachOptimize) {
 				opt.reset(lowering.context.graph);
 				opt.optGraph();
 				lowering.context.printSsa("Mach Optimized");
@@ -293,11 +292,11 @@ class MachProgram extends TargetProgram {
 			x: Record => {
 				if (V3.isVariant(x.rtype)) {
 					var ic = prog.ir.getIrClass(x.rtype);
-					// check for variants represented as enums
-					if (ic.flags.C_ENUM) return Int.box(ic.getRepTag());
+					if (ic != null && ic.flags.C_ENUM) return Int.box(ic.getRepTag()); // variant represented as enum
 				}
 				return addrOfRecord(x);
 			}
+			x: TaggedRecord => return addrOfRecord(x.record).add(int.view(x.tag));
 			x: FuncVal => return addrOfMethod(x.memberRef.asMethod());
 			x: ArrayRangeStart => {
 				var ar = arrayRep(x.arrayType);
@@ -556,6 +555,7 @@ class MachProgram extends TargetProgram {
 					null => encodeAddr(w, data, null);
 					x: Addr => encodeAddr(w, data, x);
 					x: Record => encodeAddr(w, data, addrOfRecord(x));
+					x: Box<long> => encodeAbs(w, data, x.val); // non-reference in a tagged reference slot
 					_ => encodeAbs(w, data, Int.unbox(v));
 				}
 			}
@@ -604,7 +604,7 @@ class MachProgram extends TargetProgram {
 		match (space.addressSize) {
 			1 => w.putb(u8.!(abs));
 			2 => w.put_b16(u16.!(abs));
-			4 => w.put_b32(int.!(abs));
+			4 => w.put_b32(if(abs < 0, int.!(abs), int.view(u32.!(abs)))); // packed values may be negative
 			8 => w.put_b64(abs);
 		}
 	}
@@ -622,6 +622,7 @@ class MachProgram extends TargetProgram {
 		var width: byte;
 		match (t.typeCon.kind) {
 			INT, ENUM, ENUM_SET, POINTER => width = PrimType.!(t).width;
+			ANYFUNC,
 			FUNCREF =>	width = code.addressWidth;
 			RANGE_START =>	width = data.addressWidth;
 			FLOAT =>	return if(FloatType.!(t).is64, RegClass.F64, RegClass.F32);
@@ -711,6 +712,7 @@ class MachProgram extends TargetProgram {
 	private def layoutVal(val: Val) {
 		match (val) {
 			x: Record => addrOfRecord(x);
+			x: TaggedRecord => addrOfRecord(x.record);
 			x: FuncVal => addrOfMethod(x.memberRef.asMethod());
 			x: Closure => { layoutVal(x.val); addrOfMethod(x.memberRef.asMethod()); }
 			x: BoxVal => for (e in x.values) layoutVal(e);

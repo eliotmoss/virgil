@@ -8,35 +8,22 @@ enum Scalar(width: byte, ty: Type) {
 	B64(64, Int.getType(true, 64)),		// <= 64-bit non-references
 	F32(32, Float.FLOAT32),			// 32-bit floats
 	F64(64, Float.FLOAT64),			// 64-bit floats
-	R32(32, MachModule.ANYREF_32.singleton),			// <= 32-bit (possibly tagged) references
-	R64(64, MachModule.ANYREF_64.singleton),			// <= 64-bit (possibly tagged) references
-	Ref(64, MachModule.ANYREF_64.singleton),			// references of opaque size
+	R32(32, MachModule.ANYREF_32),		// <= 32-bit (possibly tagged) references
+	R64(64, MachModule.ANYREF_64),		// <= 64-bit (possibly tagged) references
+	Ref(64, MachModule.ANYREF_64),		// references of opaque size
+	Func(64, AnyFunction.TYPE),		// function references
 }
 
 // The normalization of a variant, including the mapping of its fields to bit ranges within scalars.
 class VariantNorm extends TypeNorm {
 	def fields: Array<VariantField>;
 	def tag: VariantField;
-	var vecO: Array<Type>;
-	var fieldRanges: Array<(int, int)>; // (start, end) index for ClassAlloc instructions
 
-	var tagValue: int = -1;
-	var maxTag: int = -1;		// TODO: remove inclusive upper bound of tag range; = tagValue for leaf cases
-	var children: List<VariantNorm>;
+	var fixedBits: Array<u64>;	// per scalar, bits fixed by the representation (e.g. non-reference marker); non-null if packed into tagged references
 
 	new(oldType: Type, newType: Type, sub: Array<Type>, fields, tag)
 		super(oldType, newType, sub) { }
 
-	// represent empty variant as tag
-	def isEnum() -> bool { 
-		// Check if variants have fields
-		for (childPtr = children; childPtr != null; childPtr = childPtr.tail) {
-			def variantNorm = childPtr.head;
-			if (variantNorm.fields != null && variantNorm.fields.length > 0) return false;
-		}
-		return size == 1 && tag != null && fields.length == 0; 
-	}
-	def isEnumCase() -> bool { return size == 1 && tag != null && tagValue >= 0 && fields.length == 0; }
 	def tagType() -> IntType {
 		return if(tag != null, IntType.!(tag.tn.first()), Int.getType(false, 1));
 	}
@@ -135,19 +122,9 @@ class VariantNormalizer(nc: NormalizerConfig, rn: ReachabilityNormalizer, verbos
 
 		rn.makeNormFields(rc);
 
-		var isEmpty = rc.liveFields.length == 0;
-		var closure = rc.raFacts.RC_CLOSURE;
+		for (l = rc.subtypes; l != null; l = l.tail) rn.makeNormFields(l.head);
 
-//		Terminal.put1("tryUnboxing %q\n", rc.oldType.render);
-		for (l = rc.subtypes; l != null; l = l.tail) {
-			var c = l.head;
-//			Terminal.put1(" child: %q\n", c.oldType.render);
-			rn.makeNormFields(c);
-			if (c.liveFields.length > 0) isEmpty = false;
-			closure |= c.raFacts.RC_CLOSURE;
-		}
-
-		if (isEmpty && !closure) {
+		if (canBeEnum(rc)) {
 			// normalize empty variant to just its tag; i.e. become an enum
 			var tagType = rc.getTagType();
 			var tagTypeNorm = rn.norm(tagType);
@@ -156,6 +133,7 @@ class VariantNormalizer(nc: NormalizerConfig, rn: ReachabilityNormalizer, verbos
 			rc.visitChildrenPreOrder(unboxUsingEnumVariantNorm(rc, _, tagType, tagField));
 			return true;
 		}
+		var closure = hasClosure(rc);
 		if (rc.children != null) {
 			// multi-case variant unboxing
 			if (rc.recursive == IS_RECURSIVE || closure) return printNoUnboxReason(rc, rc.recursive == IS_RECURSIVE, closure);
@@ -170,11 +148,23 @@ class VariantNormalizer(nc: NormalizerConfig, rn: ReachabilityNormalizer, verbos
 			UNBOXED => ; // program specified unboxed; TODO: recursion or closure should be an error
 		}
 		if (rc.recursive == IS_RECURSIVE || closure) return printNoUnboxReason(rc, rc.recursive == IS_RECURSIVE, closure); // recursive or closed over
-		unboxUsingTaglessVariantNorm(rc);
-		return true;
+		return unboxUsingTaglessVariantNorm(rc);
 	}
-	private def unboxUsingTaglessVariantNorm(rc: RaClass) {
+	// A variant with no live fields in any live case (and no closures) can be represented by its tag alone.
+	private def canBeEnum(rc: RaClass) -> bool {
+		if (rc.liveFields.length > 0) return false;
+		for (l = rc.subtypes; l != null; l = l.tail) if (l.head.liveFields.length > 0) return false;
+		return !hasClosure(rc);
+	}
+	private def hasClosure(rc: RaClass) -> bool {
+		if (rc.raFacts.RC_CLOSURE) return true;
+		for (l = rc.subtypes; l != null; l = l.tail) if (l.head.raFacts.RC_CLOSURE) return true;
+		return false;
+	}
+	private def unboxUsingTaglessVariantNorm(rc: RaClass) -> bool {
 		var normFields = getNormFieldsForCase(rc);
+		// flattening the fields normalizes their types, which may reveal recursion
+		if (rc.recursive > 1) return printNoUnboxReason(rc, true, false);
 		var shouldPack = rc.orig.packed;
 
 		var solver = VariantSolver.new(nc, getScalar);
@@ -187,29 +177,27 @@ class VariantNormalizer(nc: NormalizerConfig, rn: ReachabilityNormalizer, verbos
 		setVariantFields(rc, 0, solution);
 
 		printNorm(rc, vn); // XXX: if (PRINT_PACKING)
+		return true;
 	}
 	private def getNormFieldsForCase(rc: RaClass) -> Array<Type> {
 		var rfs = rc.fields;
 		var fields = Array<VariantField>.new(rfs.length);
 
 		var new_types = NormFlattener.new(rn.context, rn.norm);
-		var old_types = NormFlattener.new(rn.context, rn.norm);
+		rn.makeOrigIndices(rc);
 
 		for (i < rfs.length) {
 			var rf = rc.fields[i];
-			var old_range = old_types.addField(rc, i);
 			if (rf != null && rf.normIndices.0 >= 0) {
 				rf.normIndices = new_types.addField(rc, i);
 				var tn = new_types.norms[new_types.norms.length - 1];
 				fields[i] = VariantField.new(rf, tn, Array<int>.new(tn.size));
-				rf.origIndices = old_range;
 			} else {
 				fields[i] = EMPTY_FIELD;
 			}
 		}
 
 		rc.variantFields = fields;
-		rc.origFieldTypes = old_types.result.extract();
 		return new_types.result.extract();
 	}
 	private def setVariantFields(rc: RaClass, caseIdx: int, soln: VariantSolution) {
@@ -266,11 +254,9 @@ class VariantNormalizer(nc: NormalizerConfig, rn: ReachabilityNormalizer, verbos
 			setVariantFields(child, i, solution);
 
 			var vn = VariantNorm.new(child.oldType, newType, solution.types, child.variantFields, tagField);
-			vn.tagValue = child.minClassId - rc.minClassId;
-			vn.maxTag = child.maxClassId - rc.minClassId - 1; // TODO: inclusive versus exclusive tagging
+			if (solution.taggedRefs) vn.fixedBits = Arrays.map(solution.state[i].scalars, ScalarPattern.extractFixed);
 			child.variantNorm = vn;
 
-			parentNorm.children = List<VariantNorm>.new(vn, parentNorm.children);
 			if (verbose) Terminal.put1("  %q\n", vn.render);
 		}
 		printNorm(rc, parentNorm); // XXX: if(PRINT_PACKING)
@@ -281,8 +267,6 @@ class VariantNormalizer(nc: NormalizerConfig, rn: ReachabilityNormalizer, verbos
 	}
 	private def unboxUsingEnumVariantNorm(root: RaClass, rc: RaClass, tagType: PrimType, tagField: VariantField) {
 		var vn = VariantNorm.new(rc.oldType, tagType, [tagType], NO_FIELDS, tagField);
-		vn.tagValue = rc.minClassId - root.minClassId;
-		vn.maxTag = rc.maxClassId - root.minClassId - 1; // TODO: inclusive versus exclusive tagging
 		rc.raFacts |= RaFact.RC_ENUM;
 		rc.variantNorm = vn;
 	}
@@ -292,11 +276,19 @@ class VariantNormalizer(nc: NormalizerConfig, rn: ReachabilityNormalizer, verbos
 
 		var seen: List<Type>;
 		for (i < normFields.length) {
+			for (f in normFields[i].0.variantFields) if (f.tn != null && hasTaggedRefs(f.tn)) return false;
 			var variantFields = normFields[i].1;
 			var caseTotalWidth = 0;
 			for (fieldType in variantFields) {
-				def widthInfo: (int, string) = PackingUtils.packingWidth(fieldType, seen);
-				caseTotalWidth += widthInfo.0;
+				if (isFuncRefType(fieldType)) return false;
+				if (isRefType(fieldType)) {
+					// references can only be packed as tagged references, which have a few free bits
+					if (nc.RefPatterns == null) return false;
+					caseTotalWidth += taggedRefWidth();
+				} else {
+					def widthInfo: (int, string) = PackingUtils.packingWidth(fieldType, seen);
+					caseTotalWidth += widthInfo.0;
+				}
 				if (caseTotalWidth > nc.MaxScalarWidth) return false;
 				// Many backends require floats to be in their own registers
 				// For now, floats will not be packed
@@ -304,6 +296,36 @@ class VariantNormalizer(nc: NormalizerConfig, rn: ReachabilityNormalizer, verbos
 			}
 		}
 		return true;
+	}
+	private def isRefType(t: Type) -> bool {
+		def none: Scalar.set;
+		return ((Scalar.Ref | Scalar.R32 | Scalar.R64) & getScalar(t)) != none;
+	}
+	private def hasTaggedRefs(tn: TypeNorm) -> bool {
+		match (tn) {
+			x: VariantNorm => {
+				if (x.fixedBits != null) return true;
+				var rc = rn.ra.getClass(x.oldType);
+				if (rc == null) return false;
+				for (l = rc.subtypes; l != null; l = l.tail) {
+					var cn = l.head.variantNorm;
+					if (cn != null && cn.fixedBits != null) return true;
+				}
+			}
+			x: TupleNorm => for (n in x.nested) if (hasTaggedRefs(n)) return true;
+			_ => ;
+		}
+		return false;
+	}
+	private def isFuncRefType(t: Type) -> bool {
+		def none: Scalar.set;
+		return (Scalar.Func & getScalar(t)) != none;
+	}
+	// Returns the number of bits of a tagged reference scalar that are not free for packing other fields.
+	private def taggedRefWidth() -> int {
+		var width = 0;
+		for (b in nc.RefPatterns.ptrref.bits) if (b != PackingBit.Unassigned) width++;
+		return width;
 	}
 	private def fieldNorm(rf: RaField) -> TypeNorm {
 		if (rf.typeNorm != null) return rf.typeNorm;

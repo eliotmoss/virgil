@@ -12,11 +12,10 @@ component RiGc {
 	def CTRL_RED	 = "\x1B[0;31m";
 	def CTRL_CYAN	 = "\x1B[0;36m";
 
-	// Constants that enable/disable debugging and stats reporting. (Use -redef-field).
+	// Constants that enable/disable debugging. (Use -redef-field). See also GcStats.enabled.
 	def verbose   = false;
 	def debug     = false;
 	def paranoid  = false;
-	def stats     = false;
 
 	def INT_SIZE  = 4;
 	def REF_SIZE  = Pointer.SIZE;
@@ -31,16 +30,23 @@ component RiGc {
 	// Interface between the GC, stack scanning, and globals scanning.
 	var scanRoot: Pointer -> void;			// provided by GC
 	var rescanRoot: Pointer -> void;		// provided by GC
+	var reloc: Pointer -> Pointer;			// provided by GC
 	var scanStack: (Pointer, Pointer) -> void;	// provided by stack scanner
 	var scanGlobals: void -> void;			// provided by global scanner
 	var inGC: void -> bool;
+	var usedBytes: void -> long;			// total space currently used
+	var allocationHeadroom: void -> long;		// space allocatable before triggering GC
+
+	// Application callbacks.
+	var preGC: void -> void;			// user callback pre GC
+	var postGC: void -> void;			// user callback post GC
 
 	// Compute the size in bytes of the object pointed to by {oop}.
 	def objectSize(maybeOop: Pointer) -> int {
 		var oop = maybeOop;
 		if (CiRuntime.FEATURE_TAGGED_REFS) {
-			if (!isOop(maybeOop)) return 0; // nonref case
-			oop = clearAuxTag(maybeOop);
+			if (!CiRuntime.isOop(maybeOop)) return 0; // nonref case
+			oop = CiRuntime.clearAuxTag(maybeOop);
 		}
 		
 		var tid = oop.load<int>();
@@ -65,7 +71,15 @@ component RiGc {
 	// Compute the size of a described object, whose field 0 points to its descriptor. The
 	// descriptor holds the size of the objects it describes in a reserved slot.
 	def describedObjectSize(oop: Pointer) -> int {
-		var desc = oop.load<Pointer>();
+		return getDescriptorSize(oop.load<Pointer>());
+	}
+	// Returns the reference map of objects described by the descriptor at {desc}, encoded like a
+	// compact type reference map (bit {i} = word {i} is a reference; highest bit = end of object).
+	def getDescriptorRefmap(desc: Pointer) -> int {
+		return (desc + DESC_REFMAP_OFFSET).load<int>();
+	}
+	// Returns the (aligned) size in bytes of objects described by the descriptor at {desc}.
+	def getDescriptorSize(desc: Pointer) -> int {
 		return (desc + DESC_SIZE_OFFSET).load<int>();
 	}
 	def simpleObjectSize(oop: Pointer, index: int) -> int {
@@ -128,8 +142,8 @@ component RiGc {
 	def scanObject(maybeOop: Pointer) -> int {
 		var oop = maybeOop;
 		if (CiRuntime.FEATURE_TAGGED_REFS) {
-			if (!isOop(maybeOop)) return 0; // nonref case
-			oop = clearAuxTag(maybeOop);
+			if (!CiRuntime.isOop(maybeOop)) return 0; // nonref case
+			oop = CiRuntime.clearAuxTag(maybeOop);
 		}
 
 		var tid = oop.load<int>();
@@ -153,9 +167,9 @@ component RiGc {
 	}
 	def scanDescribedObject(oop: Pointer) -> int {
 		var desc = oop.load<Pointer>();
-		var refmap = 1 | (desc + DESC_REFMAP_OFFSET).load<int>(); // load refmap and set bit 0 (descriptor)
+		var refmap = 1 | getDescriptorRefmap(desc); // load refmap and set bit 0 (descriptor)
 		scanRefMap(refmap, oop); // scan object using extension reference map
-		return (desc + DESC_SIZE_OFFSET).load<int>();
+		return getDescriptorSize(desc);
 	}
 	def scanSimpleObject(oop: Pointer, index: int) -> int {
 		var refmap = (CiRuntime.GC_TYPE_TABLE + index).load<int>();
@@ -259,14 +273,14 @@ component RiGc {
 			var marked = (refmap & 1) != 0;
 
 			var maybeOop = p.load<Pointer>();
-			if (!isOop(maybeOop)) {
+			if (!CiRuntime.isOop(maybeOop)) {
 				o.putp(maybeOop).puts(" not a ref | ");
 				refmap = refmap >>> 1;
 				continue;
 			}
 			var oop = maybeOop;
 			if (CiRuntime.FEATURE_TAGGED_REFS) {
-				oop = clearAuxTag(maybeOop);
+				oop = CiRuntime.clearAuxTag(maybeOop);
 			}
 
 			o.puts("@ ").putp(p).puts(" ").putc(if(marked, '*', ' ')).puts(" | ");
@@ -283,16 +297,45 @@ component RiGc {
 	private def debugScanRef(oop: Pointer, color: string, region: string) {
 		OUT.puts(color).putp(oop).puts(CTRL_DEFAULT).puts(" | ").puts(region).ln();
 	}
-	// Fast routine to zero memory pointed to by {ptr}, ending at {end}.
+	// Fast routine to zero memory pointed to by {ptr}, ending at {end}, a whole number of words
+	// later. The main loop clears 8 words per iteration: without the global register allocator,
+	// as at -O1, a loop variable makes a round trip through the stack once per iteration.
 	def memClear(ptr: Pointer, end: Pointer) {
-		for (p = ptr; p < end; p = p + Pointer.SIZE) {
+		var p = ptr;
+		if (p >= end) return;
+		var bytes = end - p;
+		var bulk = p + (bytes - (bytes & (8 * Pointer.SIZE - 1)));
+		while (p < bulk) {
 			p.store(Pointer.NULL);
+			(p + Pointer.SIZE).store(Pointer.NULL);
+			(p + 2 * Pointer.SIZE).store(Pointer.NULL);
+			(p + 3 * Pointer.SIZE).store(Pointer.NULL);
+			(p + 4 * Pointer.SIZE).store(Pointer.NULL);
+			(p + 5 * Pointer.SIZE).store(Pointer.NULL);
+			(p + 6 * Pointer.SIZE).store(Pointer.NULL);
+			(p + 7 * Pointer.SIZE).store(Pointer.NULL);
+			p = p + 8 * Pointer.SIZE;
+		}
+		while (p < end) {
+			p.store(Pointer.NULL);
+			p = p + Pointer.SIZE;
 		}
 	}
 	// Fast memory copy routine that copies {size} bytes (in word-sized chunks) from {s} to {b}.
+	// The main loop copies 4 words per iteration, for the same reason as in {memClear}.
 	def memCopy(d: Pointer, s: Pointer, size: int) {
 		var dest = d, src = s;
 		var end = src + size;
+		if (src >= end) return;
+		var bulk = src + (size - (size & (4 * Pointer.SIZE - 1)));
+		while (src < bulk) {
+			dest.store(src.load<Pointer>());
+			(dest + Pointer.SIZE).store((src + Pointer.SIZE).load<Pointer>());
+			(dest + 2 * Pointer.SIZE).store((src + 2 * Pointer.SIZE).load<Pointer>());
+			(dest + 3 * Pointer.SIZE).store((src + 3 * Pointer.SIZE).load<Pointer>());
+			src = src + 4 * Pointer.SIZE;
+			dest = dest + 4 * Pointer.SIZE;
+		}
 		while (src < end) {
 			dest.store(src.load<Pointer>());
 			src = src + Pointer.SIZE;
@@ -311,14 +354,19 @@ component RiGc {
 	private var finalizers: RiGcFinalizerLink;
 	private var scanners: RiGcScannerLink;
 	private var survivingScanners: RiGcScannerLink;
+	private var weakRefs: RiGcWeakRefLink;
 
 	// Called by user applications to register a {callback} after the object {ref} is collected.
 	def registerFinalizer<R>(oop: R, callback: void -> void) {
+		// Allocate the link first: {oop} is a traced local, so a GC triggered here updates it.
+		var link = RiGcFinalizerLink.new(Pointer.NULL, null, callback);
 		Pointer.atContents(ptrs).store(oop); // unsafe type cast R -> Pointer
-		finalizers = RiGcFinalizerLink.new(ptrs[0], finalizers, callback);
+		link.pointer = ptrs[0];
+		link.next = finalizers;
+		finalizers = link;
 	}
 	// Called by the GC after finishing a GC cycle to run weak callbacks.
-	def runFinalizers(reloc: Pointer -> Pointer) {
+	def runFinalizers() {
 		var l = finalizers;
 		finalizers = null;
 		while (l != null) {
@@ -338,12 +386,16 @@ component RiGc {
 	// Called by user applications to register a {callback} to scan an object {oop} when
 	// it is determined reachable by the GC.
 	def registerScanner<R>(oop: R, callback: R -> void) {
+		// Allocate the link first: {oop} is a traced local, so a GC triggered here updates it.
+		var link = RiGcScannerLinkOf.new(Pointer.NULL, null, callback);
 		Pointer.atContents(ptrs).store(oop); // unsafe type cast R -> Pointer
-		scanners = RiGcScannerLinkOf.new(ptrs[0], scanners, callback);
+		link.pointer = ptrs[0];
+		link.next = scanners;
+		scanners = link;
 	}
 	// Called by the GC after finishing scanning to run any user application scanners for
 	// live objects.
-	def runScanners(reloc: Pointer -> Pointer) {
+	def runScanners() {
 		var l = scanners;
 		scanners = null;
 		while (l != null) {
@@ -374,94 +426,11 @@ component RiGc {
 		}
 		scanners = survivingScanners; // overwrite old scanners list with survivors only
 		survivingScanners = null;
+		for (l = weakRefs; l != null; l = l.next) {
+			l.pointer = reloc(l.pointer); // clear/reloc weak refs
+		}
+		weakRefs = null;
 	}
-	// ===================== Helper functions for tagged pointers =====================
-	// TODO(stable): Replace uses of these helper functions with the actual Pointer and CiRuntime operators
-	// Checks if a pointer has its reference bit tagged
-	def isOop(ptr: Pointer) -> bool {
-		// Get the leftmost significant bit
-		// 0 means it's a reference/AnyRef; 1 means it's a nonref
-		def intPtr = ptr - Pointer.NULL;
-		return (intPtr & 0b1) == 0;
-	}
-	// Returns a mask where the tag bits are zero'd out 
-	def AUX_TAG_MASK() -> u64 {
-		if (Pointer.SIZE == 4) return u64.view(u32.max - 0b10u32);
-		return u64.view(((u64.max << 16) >>> 16) - 0b110u64);
-	}
-	// Removes the auxiliary tag from a pointer
-	def clearAuxTag(ptr: Pointer) -> Pointer {
-		if (Pointer.SIZE == 4) return clearAuxTag32(ptr);
-		return clearAuxTag64(ptr);
-	}
-	// Untag a 32-bit pointer
-	def clearAuxTag32(ptr: Pointer) -> Pointer {
-		// 32 bit pointers have 1 available lower tag bit 
-		def address = u32.view(ptr - Pointer.NULL);
-		def mask: u32 = u32.view(AUX_TAG_MASK());
-		def untaggedIntPtr = address & mask;
-		return Pointer_view_u32(untaggedIntPtr);
-	}
-	// Untag a 64-bit pointer
-	def clearAuxTag64(ptr: Pointer) -> Pointer {
-		// 64 bit pointers have 2-bit lower tag and 16-bit upper tag
-		def address = u64.view(ptr - Pointer.NULL);
-		var mask = AUX_TAG_MASK();
-		def untaggedIntPtr = address & mask;
-		return Pointer_view_u64(untaggedIntPtr);
-	}
-	def getAuxTag(ptr: Pointer) -> u64 {
-		if (Pointer.SIZE == 4) return getAuxTag32(ptr);
-		return getAuxTag64(ptr);
-	}
-	// Get the auxiliary tag from a 32-bit pointer 
-	def getAuxTag32(ptr: Pointer) -> u32 {
-		def mask = ~u32.view(AUX_TAG_MASK());
-		def intPtr = u32.view(ptr - Pointer.NULL);
-		return (intPtr & mask) >>> 1;
-	}
-	// Get the auxiliary tag from a 64-bit pointer 
-	def getAuxTag64(ptr: Pointer) -> u64 {
-		def mask = ~AUX_TAG_MASK();
-		def intPtr = u64.view(ptr - Pointer.NULL);
-		def lowerTag = u64.view(u2.view(intPtr >>> 1));
-		def upperTag = (intPtr >>> 48);
-		return lowerTag | (upperTag << 2);
-	}
-	def setAuxTag(ptr: Pointer, tag: u64) -> Pointer {
-		if (Pointer.SIZE == 4) return setAuxTag32(ptr, tag);
-		return setAuxTag64(ptr, tag);
-	}
-	// Set the auxiliary tag of a 32-bit pointer
-	def setAuxTag32(ptr: Pointer, tag: u64) -> Pointer {
-		def processedTag = u32.view((tag & 1) << 1);
-		var intPtr = u32.view(ptr - Pointer.NULL);
-		intPtr = (intPtr & u32.view(AUX_TAG_MASK())); 
-		intPtr |= u32.view(processedTag);
-		return Pointer_view_u32(intPtr);
-	}
-	// Set the auxiliary tag of a 64-bit pointer
-	def setAuxTag64(ptr: Pointer, tag: u64) -> Pointer {	
-		def lowerTag = u2.view(tag);
-		def upperTag = u16.view(tag >>> 2);
-		var intPtr = u64.view(ptr - Pointer.NULL);
-		intPtr = intPtr & AUX_TAG_MASK();
-		intPtr |= (u64.view(lowerTag) << 1);
-		intPtr |= (u64.view(upperTag) << 48);
-		return Pointer_view_u64(intPtr);
-	}
-}
-// Emulate Pointer.view until it is in the stable compiler.
-var pointerCastHelper: u64;  // unsafe pointer access
-// View an u32 as a pointer
-def Pointer_view_u32(address: u32) -> Pointer #intrinsic(Pointer.view<u32>) {
-	pointerCastHelper = u64.view(address);
-	return Pointer.atField(pointerCastHelper).load<Pointer>();
-}
-// View an u64 as a pointer
-def Pointer_view_u64(address: u64) -> Pointer #intrinsic(Pointer.view<u64>) {
-	pointerCastHelper = address;
-	return Pointer.atField(pointerCastHelper).load<Pointer>();
 }
 
 // A node in the list of on-collect finalizer callbacks.
@@ -479,5 +448,43 @@ private class RiGcScannerLinkOf<R> extends RiGcScannerLink {
 	def scan() {
 		var oop = Pointer.atField(this.pointer).load<R>(); // unsafe cast Pointer -> R
 		callback(oop);
+	}
+}
+
+// Base class of weak references, which are cleared by the GC after reachability is complete.
+private class RiGcWeakRefLink {
+	var pointer: Pointer;
+	var next: RiGcWeakRefLink;
+	def scan() {
+		var np = RiGc.reloc(pointer);
+		if (np != Pointer.NULL) {
+			// referrent is live, eagerly update the slot
+			pointer = np;
+		} else {
+			// referrent is not live (yet), remember for possible clearing
+			this.next = RiGc.weakRefs;
+			RiGc.weakRefs = this;
+		}
+	}
+}
+
+// A general-purpose weak reference to an object. Weak references are not roots, so the
+// object referred to can be collected, which causes this reference to be set to null.
+class WeakRef<T> extends RiGcWeakRefLink {
+	// XXX: save a scanner link by special-casing in GC's scan() routine.
+	new() { RiGc.registerScanner<RiGcWeakRefLink>(this, RiGcWeakRefLink.scan); }
+
+	def set(r: T) -> this {
+		var slot = Pointer.atField(pointer);
+		slot.store<T>(r);
+	}
+	def get() -> T {
+		if (RiGc.inGC()) {
+			// If accessed during GC (e.g. by custom scan), upgrade to a strong ref.
+			var slot = Pointer.atField(pointer);
+			RiGc.rescanRoot(slot);
+		}
+		var slot = Pointer.atField(pointer);
+		return slot.load<T>();
 	}
 }

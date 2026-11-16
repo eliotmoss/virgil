@@ -179,6 +179,7 @@ class VstClass extends VstCompound {
 	var minTag: int = -1;
 	var maxTag: int = -1;
 	var syntheticDefault: VstClass;			// hidden "$default" case for types with no named cases
+	var invalidSuperclass: bool;			// superclass reference was rejected (cyclic or wrong kind) and is ignored
 	var variantCase: VstCaseMember;
 
 	new(isPrivate: bool, name: Token, typeParams: List<TypeParamType>, params: VstList<ParamDecl>,
@@ -776,8 +777,9 @@ class ForStmt(start: FilePoint, varDecl: VarDecl, cond: Expr, update: Expr, body
 }
 // for(varDecl in expr) body
 class ForeachStmt(start: FilePoint, varDecl: VarDecl, expr: Expr, body: Stmt) extends Stmt {
-	var loopNum: int;	// loop number, computed by verifier
-	var loopVar: VstSsaVar;	// loop control variable
+	var loopNum: int;		// loop number, computed by verifier
+	var loopVar: VstSsaVar;		// loop control variable
+	var loopVar2: VstSsaVar;	// auxilliary loop variable
 
 	def accept<E, R>(v: VstVisitor<E, R>, env: E) -> R { return v.visitForeach(this, env); }
 	def range() -> FileRange { return FileRanges.add(start, FileRanges.ofStmt(body)); }
