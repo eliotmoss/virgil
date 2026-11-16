@@ -1,4 +1,4 @@
-//@parse = xParseError @ 3:18
+//@parse = ParseError @ 3:18
 def m() {
 	x = @foo f(13);
 }

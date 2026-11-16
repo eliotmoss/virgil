@@ -516,21 +516,20 @@ enum VSTKind {
 }
 
 // An annotation type declaration: "@type name(fields) { methods }".
-class VstAnnotationDecl extends Decl {
-	def fields: VstList<VarDecl>;			// VarDecl, not ParamDecl: fields may have defaults
-	def members: List<VstMember>;			// methods only
-	var declClass: VstClass;			// synthesized variant type (AnnotationDesugaring)
-	var annotations: VstList<VstAnnotation>;	// meta-annotations on this annotation
+class VstAnnotationDecl extends VstCompound {
+	// params: may have defaults (initializations) like VarDecls
+	// members: only methods are allowed
+	// annotations: meta-annotations on this annotation declaration	
 
-	new(name: Token, fields, members) super(name) { }
+	var declClass: VstClass;			// synthesized variant type (AnnotationDesugaring)
+
+	new(isPrivate: bool, name: Token, params: VstList<ParamDecl>, members: List<VstMember>) super(isPrivate, name, null, params, null, members) { }
 	def annotate(anns: VstList<VstAnnotation>) -> this { annotations = anns; }
 }
 
-class VstAnnotationAlias extends Decl {
+class VstAnnotationAlias extends VstCompound {
 	def expansion: VstList<VstAnnotation>;
-	var annotations: VstList<VstAnnotation>;
-
-	new(name: Token, expansion) super(name) { }
+	new(isPrivate: bool, name: Token, expansion) super(isPrivate, name, null, null, null, null) { }
 	def annotate(anns: VstList<VstAnnotation>) -> this { annotations = anns; }
 }
 

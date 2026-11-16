@@ -192,6 +192,8 @@ component Parser {
 					if (optKeyword(p, "type") != null) return parseVariant(p, file, true, anns);
 					if (optKeyword(p, "enum") != null) return parseEnum(p, file, true, anns);
 					if (optKeyword(p, "packing") != null) return parsePacking(p, file, true, anns);
+					if (optKeyword(p, "@type") != null) return parseAnnotationTypeDecl(p, file, true, anns);
+					if (optKeyword(p, "@def") != null) return parseAnnotationDef(p, file, true, anns);
 				}
 				if (optKeyword(p, "packing") != null) return parsePacking(p, file, false, anns);
 			}
@@ -204,50 +206,53 @@ component Parser {
 	}
 	// "@type name(fields) { methods }" or "@def name = ann, ...;".
 	def parseAnnotationDecl(p: ParserState, file: VstFile, anns: VstList<VstAnnotation>) -> bool {
-		if (optKeyword(p, "@type") != null) {
-			var id = parseIdentVoid(p).name;
-			var fields = if(p.curByte == '[', parseList(0, p, '[', COMMA, ']', parseAnnField));
-			var members: List<VstMember>;
-			if (p.curByte == ';') p.advance1();
-			else members = parseMembers(p, false);
-			for (l = members; l != null; l = l.tail) {
-				match (l.head) {
-					x: VstNew => p.errorAt(x.token.range(), "'new' not allowed in an annotation declaration");
-					x: VstField => p.errorAt(x.token.range(), "'var' not allowed in an annotation declaration");
-				}
-			}
-			var decl = VstAnnotationDecl.new(id, fields, members).annotate(anns);
-			file.annotationDecls.put(decl);
-			return true;
-		}
-		if (optKeyword(p, "@def") != null) {
-			var id = parseIdentVoid(p).name;
-			p.req1('=');
-			var start = p.point();
-			var list: List<VstAnnotation>;
-			while (true) {
-				var a = parseAnnotation(p);
-				if (a == null) break;
-				list = List.new(a, list);
-				if (p.opt1(',') < 0) break;
-			}
-			p.req1(';');
-			var expansion = VstList.new(p.end(start), Lists.reverse(list));
-			var alias = VstAnnotationAlias.new(id, expansion).annotate(anns);
-			file.annotationAliases.put(alias);
-			return true;
-		}
+		if (optKeyword(p, "@type") != null) return parseAnnotationTypeDecl(p, file, false, anns);
+		if (optKeyword(p, "@def") != null) return parseAnnotationDef(p, file, false, anns);
 		p.error("expected @type or @def");
 		return false;
 	}
-	// AnnField ::= Annotation* Id ':' TypeRef ('=' Expr)?
-	def parseAnnField(p: ParserState) -> VarDecl {
+	private def parseAnnotationTypeDecl(p: ParserState, file: VstFile, isPrivate: bool, anns: VstList<VstAnnotation>) -> bool {
+		var id = parseIdentVoid(p).name;
+		var params = if(p.curByte == '[', parseList(0, p, '[', COMMA, ']', parseAnnParam));
+		var members: List<VstMember>;
+		if (p.curByte == ';') p.advance1();
+		else members = parseMembers(p, false);
+		for (l = members; l != null; l = l.tail) {
+			match (l.head) {
+				x: VstNew => p.errorAt(x.token.range(), "'new' not allowed in an annotation declaration");
+				x: VstField => p.errorAt(x.token.range(), "'var' not allowed in an annotation declaration");
+			}
+		}
+		var decl = VstAnnotationDecl.new(isPrivate, id, params, members).annotate(anns);
+		file.annotationDecls.put(decl);
+		return true;
+	}
+	private def parseAnnotationDef(p: ParserState, file: VstFile, isPrivate: bool, anns: VstList<VstAnnotation>) -> bool {
+		var id = parseIdentVoid(p).name;
+		p.req1('=');
+		var start = p.point();
+		var list: List<VstAnnotation>;
+		while (true) {
+			var a = parseAnnotation(p);
+			if (a == null) break;
+			list = List.new(a, list);
+			if (p.opt1(',') < 0) break;
+		}
+		p.req1(';');
+		var expansion = VstList.new(p.end(start), Lists.reverse(list));
+		var alias = VstAnnotationAlias.new(isPrivate, id, expansion).annotate(anns);
+		file.annotationAliases.put(alias);
+		return true;
+	}
+	// AnnParam ::= Annotation* Id ':' TypeRef ('=' Expr)?
+	def parseAnnParam(p: ParserState) -> ParamDecl {
 		var anns = parseAnnotations(p);
 		var id = parseIdentVoid(p).name;
 		p.req1(':');
 		var tref = parseTypeRef(p);
 		var init = if(p.opt1('=') >= 0, parseExpr(p));
-		var d = VarDecl.new(id, tref, init).annotate(anns);
+		var d = ParamDecl.new(id, tref).annotate(anns);
+		d.init = init;
 		d.isReadOnly = true;
 		return d;
 	}
