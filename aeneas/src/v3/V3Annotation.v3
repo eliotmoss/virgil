@@ -1,0 +1,21 @@
+// Copyright 2011 Google Inc. All rights reserved.
+// See LICENSE for details of Apache 2.0 license.
+
+// The type constructor for annotation types.
+class V3Annotation_TypeCon extends TypeCon {
+	def annotationDecl: VstAnnotationDecl;
+
+	new(annotationDecl, typeCache: TypeCache)
+		super(annotationDecl.fullName, Kind.ANNOTATION, 0, typeCache) {
+		singleton = AnnotationType.new(uid, annotationDecl, this);
+	}
+	def alloc(hash: int, nested: List<Type>) -> AnnotationType {
+		// Note: nested should always be null
+		return AnnotationType.new(hash, annotationDecl, this);
+	}
+}
+// The type for annotation types.
+class AnnotationType extends Type {
+	def annotationDecl: VstAnnotationDecl;
+	new(hash: int, annotationDecl, typeCon: V3Annotation_TypeCon) super(hash, typeCon, null) { }
+}

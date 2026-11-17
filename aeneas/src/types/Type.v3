@@ -23,7 +23,8 @@ enum Kind {
 	POINTER,
 	REF,
 	RANGE,
-	RANGE_START
+	RANGE_START,
+	ANNOTATION
 }
 
 // Some constants for internal masking.

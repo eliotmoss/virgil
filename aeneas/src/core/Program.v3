@@ -95,7 +95,7 @@ class Program {
 	def getDefaultValue(t: Type) -> Val {
 		match (t.typeCon.kind) {
 			VOID, BOOL, INT, FLOAT, ARRAY, COMPONENT, CLASS, ANYREF,
-			CLOSURE, FUNCREF, ANYFUNC, ENUM, ENUM_SET, POINTER, REF, RANGE, RANGE_START => return Values.BOTTOM;
+			CLOSURE, FUNCREF, ANYFUNC, ENUM, ENUM_SET, POINTER, REF, RANGE, RANGE_START, ANNOTATION => return Values.BOTTOM;
 			VARIANT => {
 				var prev = ir.getDefaultVal(t);
 				if (prev != null) return prev;

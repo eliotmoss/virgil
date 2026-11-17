@@ -193,7 +193,11 @@ component Parser {
 					if (optKeyword(p, "enum") != null) return parseEnum(p, file, true, anns);
 					if (optKeyword(p, "packing") != null) return parsePacking(p, file, true, anns);
 					if (optKeyword(p, "@type") != null) return parseAnnotationTypeDecl(p, file, true, anns);
-					if (optKeyword(p, "@def") != null) return parseAnnotationDef(p, file, true, anns);
+					if (optKeyword(p, "@def") != null) {
+						var synthetic = file.getSyntheticComponent();
+						synthetic.members = annotate(parseAnnotationDef(p, synthetic.members, true), synthetic.members, anns);
+						return true;
+					}
 				}
 				if (optKeyword(p, "packing") != null) return parsePacking(p, file, false, anns);
 			}
@@ -207,7 +211,11 @@ component Parser {
 	// "@type name(fields) { methods }" or "@def name = ann, ...;".
 	def parseAnnotationDecl(p: ParserState, file: VstFile, anns: VstList<VstAnnotation>) -> bool {
 		if (optKeyword(p, "@type") != null) return parseAnnotationTypeDecl(p, file, false, anns);
-		if (optKeyword(p, "@def") != null) return parseAnnotationDef(p, file, false, anns);
+		if (optKeyword(p, "@def") != null) {
+			var synthetic = file.getSyntheticComponent();
+			synthetic.members = annotate(parseAnnotationDef(p, synthetic.members, false), synthetic.members, anns);
+			return true;
+		}
 		p.error("expected @type or @def");
 		return false;
 	}
@@ -227,7 +235,7 @@ component Parser {
 		file.annotationDecls.put(decl);
 		return true;
 	}
-	private def parseAnnotationDef(p: ParserState, file: VstFile, isPrivate: bool, anns: VstList<VstAnnotation>) -> bool {
+	private def parseAnnotationDef(p: ParserState, prev: List<VstMember>, isPrivate: bool) -> List<VstMember> {
 		var id = parseIdentVoid(p).name;
 		p.req1('=');
 		var start = p.point();
@@ -240,9 +248,8 @@ component Parser {
 		}
 		p.req1(';');
 		var expansion = VstList.new(p.end(start), Lists.reverse(list));
-		var alias = VstAnnotationAlias.new(isPrivate, id, expansion).annotate(anns);
-		file.annotationAliases.put(alias);
-		return true;
+		var alias = VstAnnotationAlias.new(isPrivate, id, expansion);
+		return List.new(alias, prev);
 	}
 	// AnnParam ::= Annotation* Id ':' TypeRef ('=' Expr)?
 	def parseAnnParam(p: ParserState) -> ParamDecl {

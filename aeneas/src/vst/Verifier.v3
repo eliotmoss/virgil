@@ -32,6 +32,7 @@ class Verifier(compiler: Compiler, prog: Program) {
 		forAll(vst.layouts, verifyLayout);
 		forAll(vst.exports, verifyExport);
 		forAll(vst.packings, verifyPacking);
+//		forAll(vst.annotationDecls, verifyAnnotation)
 		forAll<VstComponent>(vst.components, typeCheckVstCompound);
 		forAll<VstClass>(vst.classes, typeCheckVstCompound);
 		forAll<VstEnum>(vst.enums, typeCheckVstCompound);
@@ -114,6 +115,14 @@ class Verifier(compiler: Compiler, prog: Program) {
 			cv.packings = prog.packings;
 		}
 		prog.vst.exports.putv(file.exports);
+		prog.vst.annotationDecls.putv(file.annotationDecls);
+		for (i < file.annotationDecls.length) {
+			var annDecl = file.annotationDecls[i];
+			annDecl.typeCon = V3Annotation_TypeCon.new(annDecl, prog.typeCache);
+			var cv = makeVerifier(annDecl, annDecl.getDeclaredType(), file);
+			cv.bindTypeCon();
+			cv.buildMembers();
+		}
 	}
 	def addInitFor(decl: VstCompound) {
 		var ctype = decl.getDeclaredType();

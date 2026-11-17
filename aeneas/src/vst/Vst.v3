@@ -10,7 +10,6 @@ class VstModule {
 	def layouts = Vector<VstLayout>.new();
 	def packings = Vector<VstPacking>.new();
 	def annotationDecls = Vector<VstAnnotationDecl>.new();
-	def annotationAliases = Vector<VstAnnotationAlias>.new();
 	var files: Array<VstFile>;			// all files, in order specified on command line
 	var redefFile: VstFile;				// synthetic file for field redefinition string
 	var fieldRedefs: VstList<VstRedefField>;	// parse field redefinitions
@@ -27,7 +26,6 @@ class VstFile extends ParsedFile {
 	def packings = Vector<VstPacking>.new();
 	def annotations = Vector<VstAnnotation>.new();	// from @file[...]
 	def annotationDecls = Vector<VstAnnotationDecl>.new();
-	def annotationAliases = Vector<VstAnnotationAlias>.new();
 	var synthetic: VstComponent;	// declaration for synthesized component
 	var typeEnv: TypeEnv;
 
@@ -528,9 +526,9 @@ class VstAnnotationDecl extends VstCompound {
 	def annotate(anns: VstList<VstAnnotation>) -> this { annotations = anns; }
 }
 
-class VstAnnotationAlias extends VstCompound {
+class VstAnnotationAlias extends VstMember {
 	def expansion: VstList<VstAnnotation>;
-	new(isPrivate: bool, name: Token, expansion) super(isPrivate, name, null, null, null, null) { }
+	new(isPrivate: bool, name: Token, expansion) super(isPrivate, name) { }
 	def annotate(anns: VstList<VstAnnotation>) -> this { annotations = anns; }
 }
 
