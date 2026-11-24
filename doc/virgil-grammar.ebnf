@@ -1,96 +1,144 @@
-Virgil ::=  ToplevelDecl* EOF
-ToplevelDecl ::= ClassDecl | ComponentDecl | VariantDecl | LayoutDecl | EnumDecl | ExportDecl | VarMember | DefMember
+/* Virgil grammar (W3C EBNF), extracted from aeneas/src/vst/Parser.v3 (branch annotations-v2).
+   See doc/grammar-claude.md for notes, feature flags, and known parser issues.
+   Productions marked [annotations], [open-types], [descriptors], [fun-exprs], [simple-bodies]
+   are only enabled by the corresponding -lang:<flag> option.
+   Any comma-separated list inside (), [], or <> may end with one trailing comma. */
 
-ClassDecl ::= "class" IdentParam ( "(" VarParamDecls? ")" )? ( "extends" TypeRef TupleExpr? )? RepHints "{" Member* "}"
-ComponentDecl ::= "import"? "component" IDENTIFIER "{" Member* "}"
-VariantDecl ::= "type" ( IdentParam "." )* IdentParam ( "(" ParamDecls? ")" )? RepHints ( ";" | "{" VariantMember* "}" )
-EnumDecl ::=  "enum" IDENTIFIER ( "(" ParamDecls? ")" )? "{" EnumCases? "}"
+Virgil ::= FileAnnotation* ToplevelDecl* EOF
+FileAnnotation ::= "@file" "[" AnnArgs "]"                          /* [annotations] */
+ToplevelDecl ::= Annotations ( ClassDecl | ComponentDecl | VariantDecl | EnumDecl | PackingDecl
+               | AnnotationTypeDecl | AnnotationAlias | ImportDecl | LayoutDecl | ExportDecl
+               | "var" FieldDecls | "def" DefDecl )
+
+ClassDecl ::= "private"? "class" IdentParam ( "(" ClassParamDecls? ")" )? ( "extends" TypeRef )? TupleExpr?
+              DescriptorInfo? RepHints Members
+DescriptorInfo ::= ( "descriptor" TypeRef )? ( "describes" TypeRef )?    /* [descriptors] */
+ComponentDecl ::= "private"? "thread"? "component" IDENTIFIER Members
+ImportDecl ::= "import" STRING? "component" IDENTIFIER Members
+VariantDecl ::= "private"? "type" IdentParam ( "(" ClassParamDecls? ")" )? ( "extends" TypeRef )? RepHints
+                ( ";" | "{" VariantMember* "}" )                    /* extends: [open-types] */
+VariantMember ::= Annotations ( "def" DefDecl | VariantCase )
+VariantCase ::= "case" IDENTIFIER ( "(" ParamDecls? ")" )? RepHints ( ";" | Members )
+              | "case" "_" RepHints ( ";" | Members )               /* [open-types] */
+EnumDecl ::= "private"? "enum" IDENTIFIER ( "(" ParamDecls? ")" )? "{" EnumCase* "}"
+EnumCase ::= Annotations IDENTIFIER ( "(" Exprs? ")" )? ","?
+PackingDecl ::= "private"? "packing" IDENTIFIER "(" PackingParams? ")" ":" INTEGER "=" PackingExpr ";"
+PackingParam ::= Annotations IDENTIFIER ":" INTEGER
+PackingParams ::= PackingParam ( "," PackingParam )*
+PackingExpr ::= BITPATTERN | "#solve" "(" PackingExprs? ")" | "#concat" "(" PackingExprs? ")"
+              | IdentParam ( "(" PackingExprs? ")" )? | Number
+PackingExprs ::= PackingExpr ( "," PackingExpr )*
 LayoutDecl ::= "layout" IDENTIFIER RepHints "{" LayoutField* LayoutSize "}"
-LayoutField ::= "+" INTEGER IDENTIFIER ":" TypeRef RepHints ";"
+LayoutField ::= "+" INTEGER Annotations IDENTIFIER ":" MemoryTypeRef RepHints ";"
 LayoutSize ::= "=" INTEGER ";"
+MemoryTypeRef ::= Annotations IDENTIFIER ( "[" INTEGER "]" )?
+ExportDecl ::= "export" ( STRING? "def" DefDecl | IdentParam ( "=" SymbolParam )? ";" | STRING "=" SymbolParam ";" )
+AnnotationTypeDecl ::= "private"? "@type" IDENTIFIER ( "[" AnnParams? "]" )? ( ";" | Members )   /* [annotations] */
+AnnotationAlias ::= "private"? "@def" IDENTIFIER "=" Annotation ( "," Annotation )* ";"         /* [annotations] */
 
-Member ::=  DefMember | NewMember | VarMember
-VariantMember ::= DefMethod | VariantCase
-VarMember ::=  "private"? "var" VarDecls ";"
-DefMember ::=  "private"? "def" (("var"? VarDecls ";") | IndexMethod | Method)
-NewMember ::=  "private"? "new" "(" NewParamDecls? ")" ( ":"? "super" TupleExpr )? BlockStmt
-DefMethod ::= "private"? "def" (IndexMethod | Method)
-VariantCase ::= "case" IDENTIFIER ( "(" ParamDecls? ")" )? RepHints ( ";" | "{" DefMethod* "}" )
-              | "case" "_" RepHints ( ";" | "{" DefMethod* "}" )
-EnumCase ::=  IDENTIFIER ( "(" ( Expr ( "," Expr )* )? ")" )?
-EnumCases ::= EnumCase ( "," EnumCase )*
+Members ::= "{" Member* "}"
+Member ::= Annotations "private"? STRING? ( "def" "var"? DefDecl | NewMember | "var" FieldDecls )
+NewMember ::= "new" "(" MethodParamDecls? ")" ( ":"? "super" TupleExpr )? BlockStmt
+DefDecl ::= IndexMethod | Method | FieldDecls
+IndexMethod ::= "[" TypedParamDecls? "]" ( "=" TypedParamDecl ( ";" | BlockStmt ) | ReturnTypeAndBody )
+Method ::= IdentParam "(" TypedParamDecls? ")" ReturnTypeAndBody
+FieldDecl ::= IDENTIFIER ( ":" TypeRef )? ( "=" Expr )? RepHints
+FieldDecls ::= FieldDecl ( "," FieldDecl )* ";"
+ReturnTypeAndBody ::= "->" ( "this" | TypeRef ) RepHints ( "=>" Expr ";" | ";" | BlockStmt )
+                    | "=>" Expr ";"                                 /* "=>" forms: [simple-bodies] */
+                    | RepHints ( ";" | BlockStmt )
 
-VarParamDecl ::=  "var"? IDENTIFIER ":" TypeRef
-VarParamDecls ::= VarParamDecl ("," VarParamDecl)*
-ParamDecl ::=  IDENTIFIER ":" TypeRef
-ParamDecls ::= ParamDecl ("," ParamDecl)*
-NewParamDecl ::= IDENTIFIER (":" TypeRef)?
-NewParamDecls ::= NewParamDecl ("," NewParamDecl)*
-IdentParam ::= IDENTIFIER ("<" TypeArgs ">")?
-TypeRef ::=  ( "(" TypeArgs? ")" | IdentParam ( "." IdentParam )* ) ( "->" TypeRef )*
-TypeArgs ::= TypeRef ("," TypeRef)*
-
-VarDecl ::= IDENTIFIER ((":" TypeRef) | ("=" Expr) | (":" TypeRef "=" Expr)) RepHints
-VarDecls ::= VarDecl ( "," VarDecl )*
-IndexMethod ::= IdentParam "[" VarParamDecls? "]" ( "=" ParamDecl | "->" TypeRef ) MethodBody
-Method ::=  IdentParam "(" VarParamDecls? ")" ReturnType? MethodBody
-ReturnType ::= "->" ( "this" | TypeRef )
-
-MethodBody ::= EmptStmt | BlockStmt | "=>" Expr ";"
-ExportDecl ::=  "export" ( DefMethod | ( STRING | Ident ) ( "=" SymbolParam )? ";" )
-Symbol ::= IDENTIFIER ("." IDENTIFIER)*
-SymbolParam ::= IdentParam ("." IdentParam)*
+ClassParamDecl ::= Annotations "var"? IDENTIFIER ":" TypeRef
+ClassParamDecls ::= ClassParamDecl ( "," ClassParamDecl )*
+TypedParamDecl ::= Annotations "var"? IDENTIFIER ":" TypeRef
+TypedParamDecls ::= TypedParamDecl ( "," TypedParamDecl )*
+ParamDecl ::= Annotations IDENTIFIER ":" TypeRef
+ParamDecls ::= ParamDecl ( "," ParamDecl )*
+MethodParamDecl ::= Annotations "var"? IDENTIFIER ( ":" TypeRef )?
+MethodParamDecls ::= MethodParamDecl ( "," MethodParamDecl )*
+IdentParam ::= IDENTIFIER ( "<" TypeArgs ">" )?
+TypeParam ::= Annotations IDENTIFIER
+TypeRef ::= Annotations ( "(" TypeArgs? ")" | IdentParam ( "." IdentParam )* ) ( "->" TypeRef )*
+TypeArgs ::= TypeRef ( "," TypeRef )*
+SymbolParam ::= IdentParam ( "." ( IdentParam | ANNOTATIONNAME ) )*
 
 BlockStmt ::= "{" Stmt* "}"
-Stmt ::=  BlockStmt | EmptyStmt | IfStmt | WhileStmt | MatchStmt | VarStmt | DefStmt | BreakStmt | ContinueStmt | ReturnStmt | ForStmt | ExprStmt
-EmptyStmt ::=  ";"
-IfStmt ::=  "if" "(" Expr ")" Stmt ( "else" Stmt )?
-WhileStmt ::=  "while" "(" Expr ")" Stmt
-MatchStmt ::=  "match" "(" Expr ")" "{" ( MatchCase MatchCase* )? "}" ( "else" Stmt )?
-MatchCase ::= ( "_" | IDENTIFIER ":" "_" | MatchPattern ( "," MatchPattern )* ) "=>" Stmt
-MatchPattern ::=  IdTypePattern | SymbolPattern | Const
-IdTypePattern ::=  IDENTIFIER ":" TypeRef
-SymbolPattern ::= Symbol ( "(" ( IDENTIFIER ( "," IDENTIFIER )* )? ")" )?
-VarStmt ::=  "var" IDENTIFIER VarDecls ";"
-DefStmt ::=  "def" IDENTIFIER VarDecls ";"
-BreakStmt ::=  "break" ";"
-ContinueStmt ::=  "continue" ";"
-ReturnStmt ::=  "return" Expr? ";"
-ForStmt ::=  "for" "(" VarDecl ( "<" Expr | "in" Expr | ";" Expr ";" Expr ) ")" Stmt
-ExprStmt ::=  Expr ";"
+Stmt ::= AnnotatedStmt | BlockStmt | EmptyStmt | IfStmt | WhileStmt | MatchStmt | VarStmt | DefStmt
+       | BreakStmt | ContinueStmt | ReturnStmt | ForStmt | ExprStmt
+AnnotatedStmt ::= Annotation+ ( BlockStmt | VarStmt | DefStmt )     /* [annotations] */
+EmptyStmt ::= ";"
+IfStmt ::= "if" "(" Expr ")" Stmt ( "else" Stmt )?
+WhileStmt ::= "while" "(" Expr ")" Stmt
+MatchStmt ::= "match" "(" Expr ")" "{" MatchCase* "}" ( "else" Stmt )?
+MatchCase ::= MatchPattern ( "," MatchPattern )* "=>" Stmt
+MatchPattern ::= "_" | IDENTIFIER ":" "_" | IdTypePattern | SymbolPattern | Const
+IdTypePattern ::= IDENTIFIER ":" TypeRef
+SymbolPattern ::= SymbolParam ( "(" ( MatchParam ( "," MatchParam )* )? ")" )?
+MatchParam ::= "_" | IDENTIFIER
+VarStmt ::= "var" LocalVars
+DefStmt ::= "def" ( IDENTIFIER "(" TypedParamDecls? ")" ReturnTypeAndBody | LocalVars )
+LocalVar ::= IDENTIFIER ( ":" TypeRef )? RepHints ( "=" Expr )?
+LocalVars ::= LocalVar ( "," LocalVar )* ";"
+LoopVar ::= IDENTIFIER ( ":" TypeRef )? ( "=" Expr )?
+BreakStmt ::= "break" ";"
+ContinueStmt ::= "continue" ";"
+ReturnStmt ::= "return" Expr? ";"
+ForStmt ::= "for" "(" LoopVar ( "<" Expr | "in" Expr | ";" Expr ";" Expr? ) ")" Stmt
+ExprStmt ::= Expr ";"
 
-Expr ::= SubExpr (Assign Expr)?
-Exprs ::= Expr ("," Expr)*
-SubExpr ::= InExpr (Infix InExpr)?
-InExpr ::= Term TermSuffix*
-TermSuffix ::= (MemberSuffix | ApplySuffix | IndexSuffix | IncOrDec)
-MemberSuffix ::=  "." ( IdentParam | INTEGER | Operator )
+Expr ::= SubExpr "=" Expr | SubExpr ( Infix SubExpr )*
+Exprs ::= Expr ( "," Expr )*
+SubExpr ::= Term TermSuffix*
+TermSuffix ::= MemberSuffix | ApplySuffix | IndexSuffix | IncOrDec    /* IncOrDec ends the chain */
+MemberSuffix ::= "." ( IdentParam | INTEGER | Operator | ANNOTATIONNAME )
 ApplySuffix ::= "(" Exprs? ")"
-IndexSuffix ::= "[" Exprs "]"
-Term ::= (IncOrDec | "-")? (ParamExpr | Literal | ArrayExpr | TupleExpr | IfExpr | FunExpr)
-FunExpr ::= "fun" FunExprParams? ReturnType? (BlockStmt | ("=>" Expr))
-TupleExpr ::=  "(" Exprs? ")"
-ArrayExpr ::=  "[" Exprs? "]"
-ParamExpr ::=  "_"
-IfExpr ::= "if" "(" Expr "," Expr ( "," Expr )? ")"
-Literal ::= Const | "this"
-Const ::= CHAR | STRING | INTEGER | FLOAT | "true" | "false" | "null"
+IndexSuffix ::= "[" ( Exprs | Expr "..." Expr? | Expr "..+" Expr )? "]"
+Term ::= AnnotatedExpr | IfExpr | FunExpr | IdentParam | Literal | AnnotationValue
+       | TupleExpr | ArrayExpr | ParamExpr
+       | ( "!" | "~" | "-" | IncOrDec ) SubExpr
+AnnotatedExpr ::= Annotation+ TupleExpr                             /* [annotations] */
+AnnotationValue ::= ANNOTATIONNAME TermSuffix* ( Infix SubExpr )*   /* [annotations] */
+IfExpr ::= "if" "(" Exprs ")"                                       /* verifier requires 3 args */
+FunExpr ::= "fun" FunExprParams ReturnTypeAndBody                   /* [fun-exprs] */
+FunExprParams ::= ( IDENTIFIER ( "(" MethodParamDecls? ")" | ":" TypeRef )? | "(" MethodParamDecls? ")" )?
+                  /* NB: the IDENTIFIER ":" TypeRef form currently fails to parse; see grammar-claude.md */
+TupleExpr ::= "(" Exprs? ")"
+ArrayExpr ::= "[" Exprs? "]"
+ParamExpr ::= "_"
+Literal ::= Const
+Const ::= CHAR | STRING | Number | "true" | "false" | "null"
 
-FunExprParams ::= NewParamDecl | ("(" NewParamDecls? ")")?
-RepHints ::= REPHINT*
+Annotations ::= Annotation*                                         /* empty unless [annotations] */
+Annotation ::= ANNOTATIONNAME ( "[" AnnArgs? "]" )?
+AnnArg ::= Annotation* ( IDENTIFIER ":" )? ( AnnotationValue | Expr )?
+AnnArgs ::= AnnArg ( "," AnnArg )*
+AnnParam ::= Annotations IDENTIFIER ":" TypeRef ( "=" Expr )?
+AnnParams ::= AnnParam ( "," AnnParam )*
 
-IncOrDec ::=  "++" | "--"
-Operator ::= Infix | CastOrQuery | "-" | "~" | "[]" | "[]="
-CastOrQuery ::= ("!" | "?") ( "<" TypeArgs ">" )?
-Assign ::= "=" | "<<=" | ">>=" | "|=" | "&=" | "<<<=" ">>>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "^="
-Infix ::=  "==" | "!=" | "||" | "&&" | "<" | "<=" | ">" | ">=" | "|" | "&" | "<<" | "<<<" | ">>" | ">>>" | "+" | "-" | "*" | "/" | "%" | "^"
+RepHints ::= RepHint*
+RepHint ::= "#packing" ( "(" PackingExprs? ")" | PackingExpr )
+          | REPHINT ( "(" Exprs? ")" | "<" TypeArgs? ">" )?
 
-REPHINT ::= #[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ] [-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*
-IDENTIFIER ::= [abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ] [abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*
-CHAR ::= "'" (HEXCHAR | PRINTABLE | ESCAPE)  "'"
-INTEGER ::= [0] | ([-]? ([123456789][0123456789]* | "0x" [abcdefABCDEF0123456789]+)) [uU]? [lL]?
-FLOAT ::= [-]? ([0] | ([123456789][0123456789]*)) ('.' [0123456789]*)? ([eE] [+-]? ([0] | [123456789][0123456789]*))? [fFdD]?
-STRING ::= """ ( HEXCHAR | PRINTABLE | ESCAPE )* """
-HEXCHAR ::= [x][0123456789ABCDEFabcdef][0123456789ABCDEFabcdef]
-PRINTABLE ::= [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789`~!@#$%^&*()-_=+\[{\]};:,<.>/?]
-ESCAPE ::= [\\][rnbt'"]
+IncOrDec ::= "++" | "--"
+Operator ::= Infix | CastOrQuery | "~" | "[]" | "[]="
+CastOrQuery ::= ( "!" | "?" ) ( "<" TypeArgs ">" )?
+Infix ::= "==" | "!=" | "||" | "&&" | "<" | "<=" | ">" | ">=" | "|" | "&" | "^" | "<<" | ">>" | ">>>"
+        | "+" | "-" | "*" | "/" | "%" | Assign
+Assign ::= "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>="
+
+REPHINT ::= "#" [a-zA-Z] [-:a-zA-Z0-9_]*
+ANNOTATIONNAME ::= "@" [a-zA-Z] [a-zA-Z0-9_]*                       /* not a keyword */
+IDENTIFIER ::= [a-zA-Z] [a-zA-Z0-9_]*
+BITPATTERN ::= "0" [bB] [01?a-zA-Z_]*                               /* must contain "?" or a letter */
+Number ::= "-"? ( INTEGER | FLOAT )
+INTEGER ::= ( DECIMAL | "0" [xX] [0-9a-fA-F_]+ | "0" [bB] [01_]+ ) IntSuffix?
+DECIMAL ::= "0" | [1-9] [0-9_]*
+IntSuffix ::= [uU] ( [lL] | [1-9] [0-9]* )? | "i" [1-9] [0-9]* | [lL]
+FLOAT ::= DECIMAL ( "." [0-9_]* )? ( [eE] [+-]? [0-9]+ )? [fFdD]?
+CHAR ::= "'" ( HEXCHAR | PRINTABLE | ESCAPE ) "'"
+STRING ::= '"' ( HEXCHAR | PRINTABLE | ESCAPE )* '"'
+HEXCHAR ::= "\x" [0-9A-Fa-f] [0-9A-Fa-f]
+PRINTABLE ::= [ -~] - ["'\]
+ESCAPE ::= "\" [rnbt'"\]
+COMMENT ::= "//" [^#xA]* | "/*" ( [^*] | "*" [^/] )* "*/"           /* block comments do not nest */
+WHITESPACE ::= #x20 | #x9 | #xA                                     /* #xD (CR) is an error */

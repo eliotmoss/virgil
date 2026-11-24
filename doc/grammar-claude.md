@@ -1,30 +1,50 @@
 # Virgil Grammar
 
-Extracted from `aeneas/src/vst/Parser.v3`. Written in EBNF; `,*` means comma-separated list, `?` means optional, `*` means zero or more.
+Extracted from `aeneas/src/vst/Parser.v3` (branch `annotations-v2`). The notation is EBNF:
 
-A `,*` list may carry a single trailing comma before its closing delimiter
-(e.g. `[1, 2, 3,]`, `f(a, b,)`, `enum E { A, B, }`). This does not apply to
-declarator lists such as `var x = 1, y = 2;`, which still require a `;`.
+```
+X?   optional        X*   zero or more        X+   one or more
+X,*  comma-separated list, zero or more       X,+  same, at least one
+'tok' literal token   id  identifier          [flag]  production enabled only by -lang:<flag>
+```
+
+A `,*` / `,+` list inside a delimiter (`()`, `[]`, `<>`) may have one trailing comma before its
+closing delimiter (e.g. `[1, 2, 3,]`, `f(a, b,)`, `List<int,>`). This does not apply to declarator
+lists such as `var x = 1, y = 2;`, which end in `;`.
+
+Feature flags (`aeneas/src/main/CLOptions.v3`):
+
+| Flag | Default | Enables |
+|---|---|---|
+| `-lang:fun-exprs` | on | `fun` expressions |
+| `-lang:simple-bodies` | on | `=> Expr` bodies |
+| `-lang:open-types` | off (UNSTABLE builds only) | `case _`, variant `extends` |
+| `-lang:descriptors` | off (UNSTABLE only) | class `descriptor` / `describes` clauses |
+| `-lang:annotations` | off (UNSTABLE only) | all `@...` forms. `Anns` below means `Annotation*` when the flag is on and nothing when it is off |
 
 ---
 
 ## Top Level
 
 ```
-File ::= ToplevelDecl*
+File ::= FileAnnotation* ToplevelDecl*
 
-ToplevelDecl ::=
-    | ['private'] 'class'              ClassDecl
-    | ['private'] 'component'          id Members
-    | ['private'] 'thread' 'component' id Members
-    | ['private'] 'type'               VariantDecl
-    | ['private'] 'enum'               EnumDecl
-    | ['private'] 'packing'            PackingDecl
-    | 'import' [string] 'component'    id Members
-    | 'layout'                         LayoutDecl
-    | 'export'                         ExportDecl
-    | 'var'  VarDef ';'
-    | 'def'  DefDef ';'
+FileAnnotation ::= [annotations] '@file' '[' AnnArg,+ ']'
+
+ToplevelDecl ::= Anns
+    ( 'private'? 'class'              ClassDecl
+    | 'private'? 'component'          id Members
+    | 'private'? 'thread' 'component' id Members
+    | 'private'? 'type'               VariantDecl
+    | 'private'? 'enum'               EnumDecl
+    | 'private'? 'packing'            PackingDecl
+    | 'private'? '@type'              AnnotationTypeDecl     // [annotations]
+    | 'private'? '@def'               AnnotationAlias        // [annotations]
+    | 'import' string? 'component'    id Members             // members may carry import names
+    | 'layout'                        LayoutDecl
+    | 'export'                        ExportDecl             // annotations are an error here
+    | 'var'                           FieldDecls             // members of the file's synthetic component
+    | 'def'                           DefDecl )
 ```
 
 ---
@@ -32,70 +52,55 @@ ToplevelDecl ::=
 ## Declarations
 
 ```
-ClassDecl   ::= id TypeParams? ClassParams? ('extends' TypeRef TupleExpr?)? RepHints? Members
+ClassDecl ::= id TypeParams? ClassParams?
+              ('extends' TypeRef)?
+              TupleExpr?                          // super-constructor args
+              DescriptorInfo?                     // [descriptors]
+              RepHints Members
+DescriptorInfo ::= ('descriptor' TypeRef)? ('describes' TypeRef)?
 
-VariantDecl ::= DottedId TypeParams? VariantCaseParams? RepHints? (';' | '{' VariantCase* '}')
-VariantCase ::= 'case' id VariantCaseParams? RepHints? (';' | Members)   // named case
-              | 'case' '_' RepHints? (';' | DefaultCaseMembers)           // default case: optional, must be last, at most one
-              | 'def' DefDef
+VariantDecl   ::= id TypeParams? ClassParams?
+                  ('extends' TypeRef)?            // [open-types]
+                  RepHints (';' | '{' VariantMember* '}')
+VariantMember ::= Anns
+                  ( 'def' DefDecl                 // no 'private'; may be a method, index method, or field
+                  | 'case' id CaseParams? RepHints (';' | Members)
+                  | 'case' '_' RepHints (';' | Members) )   // [open-types] default case
 
-DefaultCaseMembers ::= '{' (['private'] 'def' DefDef)* '}'               // only methods allowed (no 'var' or 'new')
+EnumDecl ::= id EnumParams? '{' EnumCase* '}'
+EnumCase ::= Anns id ('(' Expr,* ')')? ','?
 
-DottedId    ::= (id TypeArgs? '.')* id TypeParams?
-              // qualifier parts may carry type args; final part carries type params
-```
-
-### Variant subtype constraints (checked by verifier)
-
-A `VariantDecl` whose `DottedId` is a plain `id` is a **root** (top-level) variant.
-
-A `VariantDecl` whose `DottedId` has the form `D.T` (one or more dots) declares a **subtype variant**:
-
-- The first identifier in `D` must name a root variant.
-- Every intermediate identifier in `D` must name a variant that is a direct subtype of the previous one (transitively established by prior declarations).
-- The immediate parent (the variant named by all of `D`) must have a `case _`.
-- `T` must not clash with any named `case id` of the immediate parent.
-- `D.T` may be declared at most once (among all files of the program).
-- RepHints (`#boxed`, `#unboxed`, etc.) are **not** allowed on subtype variants; they are only allowed on root variants.
-
-### Subtype type parameters (pass-through)
-
-A parameterized root variant (e.g. `type Foo<T> { ... }`) may have parameterized subtypes that **pass through** the same type parameters. The subtype must declare the same number of type parameters as the root. Two declaration forms are supported:
-
-- **Explicit binding**: `type Foo<T>.Bar<T> { case B(v: T); }` — the qualifier carries matching type args.
-- **Shorthand**: `type Foo.Bar<T> { case B(v: T); }` — the qualifier omits type args (same meaning).
-
-When referencing a parameterized subtype, type arguments may be provided in several ways:
-
-- `Bar<int>` — direct reference with explicit type args.
-- `Foo<int>.Bar` — the left side provides type args; the subtype inherits them.
-- `Foo<int>.Bar<int>` — fully explicit; right-side args must match the left.
-
-In match patterns, unqualified subtype names (`Bar =>` or `b: Bar =>`) automatically inherit type arguments from the type being matched.
-
-### Variant method inheritance
-
-- A `def m` declared directly in a variant `T` is inherited by all subtype variants of `T` (transitively). It may be overridden in a subtype following the same rules as class method overrides.
-- A `def m` declared in the `case _` body of variant `T` is inherited by direct subtypes of `T`. It may override a `def m` already declared on `T` or a supertype of `T`, and may itself be overridden in subtypes. A `case _` method may have no body (abstract).
-
-```
-
-EnumDecl    ::= id EnumParams? '{' EnumCase* '}'
-EnumCase    ::= id ['(' Expr,* ')'] ','?
-
-PackingDecl ::= id '(' PackingParam,* ')' ':' int '=' PackingExpr ';'
-PackingParam ::= id ':' int
-PackingExpr  ::= BitPattern                           // 0b...
-               | '#' 'solve'  '(' PackingExpr,* ')'
+PackingDecl  ::= id '(' PackingParam,* ')' ':' IntLiteral '=' PackingExpr ';'
+PackingParam ::= Anns id ':' IntLiteral
+PackingExpr  ::= BitPattern                              // 0b... containing '?' or letters
+               | '#' 'solve'  '(' PackingExpr,* ')'      // not in packing decls, not nested
                | '#' 'concat' '(' PackingExpr,* ')'
-               | id ['(' PackingExpr,* ')']           // application or field
+               | id TypeArgs? ('(' PackingExpr,* ')')?   // application or field
                | Number
+BitPattern   ::= '0' ('b'|'B') ('0' | '1' | '?' | Letter | '_')*
 
-LayoutDecl  ::= '{' LayoutField* '=' int ';' '}'
-LayoutField ::= '+' int id ':' MemoryTypeRef RepHints? ';'
+LayoutDecl  ::= id RepHints '{' LayoutField* '=' IntLiteral ';' '}'
+LayoutField ::= '+' IntLiteral Anns id ':' MemoryTypeRef RepHints ';'
 
-ExportDecl  ::= [string] ('def' DefDef | id ['=' DottedVarExpr] ';')
+ExportDecl    ::= string? 'def' DefDecl                  // an explicit name applies to exactly one decl
+                | id TypeArgs? ('=' DottedVarExpr)? ';'
+                | string '=' DottedVarExpr ';'
+DottedVarExpr ::= id TypeArgs? ('.' (id TypeArgs? | AnnotationName))*
 ```
+
+### Annotation declarations `[annotations]`
+
+```
+AnnotationTypeDecl ::= id ('[' AnnParam,* ']')? (';' | Members)    // only 'def' members allowed
+AnnotationAlias    ::= id '=' Annotation (',' Annotation)* ';'
+AnnParam           ::= Anns id ':' TypeRef ('=' Expr)?
+```
+
+### Variant constraints (checked by the parser or verifier)
+
+- `case` is an error if the variant head has parameters (`type T(x: int) { case A; }`).
+- `case _` may appear at most once, and only after every named case. Its `Members` may not contain
+  `new` or `var`.
 
 ---
 
@@ -103,45 +108,59 @@ ExportDecl  ::= [string] ('def' DefDef | id ['=' DottedVarExpr] ';')
 
 ```
 Members ::= '{' Member* '}'
-Member  ::= ['private'] [string]
-            ( 'def' ['var'] DefDef
-            | 'new'         NewDef
-            | 'var'         VarDef )
+Member  ::= Anns 'private'? string?                // the string (import name) only inside 'import component'
+            ( 'def' 'var'? DefDecl                 // 'private def var' is an error
+            | 'new' NewDecl
+            | 'var' FieldDecls )
 
-NewDef  ::= MethodParams (':' 'super' TupleExpr | 'super' TupleExpr)? BlockStmt
+NewDecl ::= MethodParams (':' 'super' TupleExpr | 'super' TupleExpr)? BlockStmt
 
-DefDef  ::= id TypeParams? MethodParams ReturnTypeAndBody                 // method
-          | id TypeParams? ':' TypeRef '=' Expr ';'                       // field alias
+DefDecl ::= IndexDecl
+          | id TypeParams? TypedParams ReturnTypeAndBody     // method (TypeParams always make it a method)
+          | FieldDecls                                        // read-only field(s)
 
-VarDef  ::= id [':' TypeRef] ['=' Expr] ';'
+IndexDecl ::= '[' TypedParam,* ']'
+              ( '=' TypedParam (';' | BlockStmt)             // setter, named "[]="
+              | ReturnTypeAndBody )                          // getter, named "[]"
+
+FieldDecls ::= FieldDecl (',' FieldDecl)* ';'
+FieldDecl  ::= id (':' TypeRef)? ('=' Expr)? RepHints        // hints AFTER the initializer
 
 ReturnTypeAndBody ::=
-    '->' ('this' | TypeRef) RepHints? ( '=>' Expr ';'   // simple body (unstable)
-                                      | ';'
-                                      | BlockStmt )
-  | '=>' Expr                                            // implicit return type (unstable)
-  | RepHints? (';' | BlockStmt)
+    '->' ('this' | TypeRef) RepHints
+         ( '=>' Expr ';'                    // [simple-bodies]  (no ';' in a fun expression)
+         | ';'
+         | BlockStmt )
+  | '=>' Expr ';'                           // [simple-bodies]  implicit return type
+  | RepHints (';' | BlockStmt)
 ```
 
 ---
 
-## Types
+## Parameters and Types
 
 ```
-TypeRef       ::= '(' TypeRef,* ')'              // tuple type
-                | id ('.' id)* ('->' TypeRef)*   // named type / function type
+ClassParams  ::= '(' ClassParam,* ')'      // class/variant head: 'var' allowed, type required, default def
+EnumParams   ::= '(' EnumParam,* ')'       // no 'var', type required
+CaseParams   ::= EnumParams                // variant case params
+TypedParams  ::= '(' TypedParam,* ')'      // def methods, nested local defs: 'var' allowed, type required
+MethodParams ::= '(' MethodParam,* ')'     // new, fun: 'var' allowed, type optional
 
-MemoryTypeRef ::= id ('[' int ']')?
+ClassParam  ::= Anns 'var'? id ':' TypeRef
+EnumParam   ::= Anns id ':' TypeRef
+TypedParam  ::= Anns 'var'? id ':' TypeRef
+MethodParam ::= Anns 'var'? id (':' TypeRef)?
 
-TypeParams    ::= '<' TypeParam,+ '>'
-TypeParam     ::= id
+TypeParams ::= '<' TypeParam,+ '>'
+TypeParam  ::= Anns id
+TypeArgs   ::= '<' TypeRef,+ '>'
 
-ClassParams        ::= '(' ParamDecl,* ')'       // class constructor params (typed, def read-only)
-MethodParams       ::= '(' ParamDecl,* ')'       // method params (optionally typed)
-VariantCaseParams  ::= '(' ParamDecl,* ')'       // like enum params (typed, def read-only)
-EnumParams         ::= '(' ParamDecl,* ')'       // typed, immutable
+TypeRef ::= Anns
+            ( '(' TypeRef,* ')'                  // tuple type; () is void
+            | id TypeArgs? ('.' id TypeArgs?)* ) // (qualified) named type
+            ('->' TypeRef)*                      // function type
 
-ParamDecl ::= ['var'] id [':' TypeRef]
+MemoryTypeRef ::= Anns id ('[' IntLiteral ']')?
 ```
 
 ---
@@ -149,22 +168,29 @@ ParamDecl ::= ['var'] id [':' TypeRef]
 ## Statements
 
 ```
-Stmt ::= BlockStmt
+Stmt ::= AnnotatedStmt
+       | BlockStmt
        | ';'
-       | 'if'       '(' Expr ')' Stmt ('else' Stmt)?
-       | 'while'    '(' Expr ')' Stmt
-       | 'for'      '(' VarDecl '<'  Expr         ')' Stmt   // range:   for (i < n)
-       | 'for'      '(' VarDecl 'in' Expr         ')' Stmt   // foreach: for (x in xs)
-       | 'for'      '(' VarDecl ';'  Expr ';' Expr? ')' Stmt // C-style: for (;;)
-       | 'match'    '(' Expr ')' '{' MatchCase* '}' ('else' Stmt)?
-       | 'var'      id VarDef
-       | 'def'      id (MethodParams ReturnTypeAndBody | VarDef)  // local def or nested fn
-       | 'break'    ';'
+       | 'if'    '(' Expr ')' Stmt ('else' Stmt)?
+       | 'while' '(' Expr ')' Stmt
+       | 'for'   '(' LoopVar '<'  Expr ')' Stmt                // range:   for (i < n)
+       | 'for'   '(' LoopVar 'in' Expr ')' Stmt                // foreach: for (x in xs)
+       | 'for'   '(' LoopVar ';' Expr ';' Expr? ')' Stmt       // C-style; update may be empty
+       | 'match' '(' Expr ')' '{' MatchCase* '}' ('else' Stmt)?
+       | 'var' LocalVars
+       | 'def' id TypedParams ReturnTypeAndBody                 // nested function (no type params)
+       | 'def' LocalVars                                        // read-only locals
+       | 'break' ';'
        | 'continue' ';'
-       | 'return'   Expr? ';'
+       | 'return' Expr? ';'
        | Expr ';'
 
+AnnotatedStmt ::= [annotations] Annotation+ (BlockStmt | 'var' LocalVars | 'def' ...)
+                  // annotations on any other statement kind are an error
 BlockStmt ::= '{' Stmt* '}'
+LocalVars ::= LocalVar (',' LocalVar)* ';'
+LocalVar  ::= id (':' TypeRef)? RepHints ('=' Expr)?    // hints BEFORE the initializer
+LoopVar   ::= id (':' TypeRef)? ('=' Expr)?             // no hints
 ```
 
 ---
@@ -172,104 +198,114 @@ BlockStmt ::= '{' Stmt* '}'
 ## Match Cases
 
 ```
-MatchCase   ::= '_' '=>' Stmt                               // wildcard
-              | id ':' '_' '=>' Stmt                        // named wildcard (binds matched value to id)
-              | MatchPattern (',' MatchPattern)* '=>' Stmt
+MatchCase    ::= MatchPattern (',' MatchPattern)* '=>' Stmt
 
-MatchPattern ::= id ':' TypeRef                             // binding pattern
-               | id ('.' id)* ('(' MatchParam,* ')')?      // variant / dotted name with optional destructure
-               | ByteLiteral | Number
+MatchPattern ::= '_'                                  // default (also allowed inside a comma list)
                | 'true' | 'false' | 'null'
+               | id ':' '_'                           // named default: binds matched value to id
+               | id ':' TypeRef                       // type-test binding
+               | DottedVarExpr ('(' MatchParam,* ')')?   // case / constant, optional destructuring
+               | ByteLiteral
+               | Number                               // a leading '-' is allowed
 
-MatchParam  ::= '_' | id
+MatchParam ::= '_' | id
 ```
-
-### Variant match pattern semantics
-
-When matching on an expression of variant type `T`, the second rule of `MatchPattern` may name:
-
-- A **named case** of `T` (e.g. `X` where `T` has `case X`) — matched by tag
-- A **subtype variant** of `T` (e.g. `S` where `T.S` is a subtype) — matched by runtime type check (`S.?(value)`)
-
-Only the **unqualified** name is legal in the second rule. For example, if `T.S` is a subtype of `T`, write `S`, not `T.S`.
-
-A match on a variant type `T` that has `case _` must always include a `_` arm regardless of which named cases or subtypes are listed.
-
-Subtype names may also appear as the `TypeRef` in the **first rule** (binding pattern `x: S`), in which case `x` is bound and cast to the subtype type.
 
 ---
 
 ## Expressions
 
-Binary operators are parsed with a precedence-climbing stack (Pratt-style), not nested grammar rules.
+The parser handles binary operators with an operator-precedence stack (`addBinOpSuffixes`), using
+the precedences in `V3Infix`, instead of nested grammar rules. Compound assignments use the same
+stack at precedence 0.
 
 ```
-Expr    ::= SubExpr ('=' Expr)?                 // assignment (= not ==)
-          | SubExpr BinOp SubExpr ...           // binary ops with precedence
+Expr    ::= SubExpr '=' Expr                 // assignment, right-associative ('=' not '==')
+          | SubExpr (BinOp SubExpr)*
 
 SubExpr ::= Term Suffix*
 
-Suffix  ::= '.' MemberRef                      // field / method access
-          | '(' Expr,* ')'                     // call
-          | '[' ']'                            // empty index
-          | '[' Expr ('...' Expr? | '..+' Expr)? ']'   // index or range slice
-          | '[' Expr (',' Expr)* ']'           // multi-index
-          | '++'                               // postfix increment
-          | '--'                               // postfix decrement
+Suffix  ::= '.' MemberRef
+          | '(' Expr,* ')'                   // call
+          | '[' ']'                          // empty index
+          | '[' Expr '...' Expr? ']'         // range slice [a ... b]
+          | '[' Expr '..+' Expr ']'          // range slice [a ..+ len]
+          | '[' Expr (',' Expr)* ']'         // index / multi-index
+          | '++' | '--'                      // postfix; ends the suffix chain
 
-MemberRef ::= id ['<' TypeRef,* '>']           // named member
-            | '!' | '?'                        // cast / option operators
-            | BinOp                            // operator member (e.g. .+)
-            | decimal                          // tuple field by index (e.g. .0)
-            | '~'                              // complement member
-            | '[]' | '[]='                     // index operator members
+MemberRef ::= id TypeArgs?                   // named member; keywords are accepted here
+            | ('!' | '?') TypeArgs?          // cast / query, e.g. x.!<int>
+            | BinOp                          // operator member, e.g. .+  .==
+            | decimal                        // tuple element, e.g. .0
+            | AnnotationName                 // [annotations] annotation query, e.g. x.@ann
+            | '~'
+            | '[]=' | '[]'                   // index operator members
 
-Term ::= 'if'  '(' Expr (',' Expr)+ ')'        // ternary if-expression
-       | 'fun' id? Params ReturnTypeAndBody     // function expression (unstable)
-       | id ['<' TypeRef,* '>']                // variable reference
-       | Number                                // integer, float, hex, binary
-       | '\'' char '\''                        // byte literal
-       | '"' ... '"'                           // string literal
-       | '(' Expr,* ')'                        // tuple
-       | '[' Expr,* ']'                        // array literal
-       | '!' SubExpr                           // logical not
-       | '~' SubExpr                           // bitwise complement
-       | '-' SubExpr                           // negation
-       | '--' SubExpr                          // prefix decrement
-       | '++' SubExpr                          // prefix increment
-       | '_'                                   // partial application hole
+Term ::= [annotations] Annotation+ '(' ...   // annotated parenthesized expression
+       | 'if' '(' Expr,+ ')'                 // if-expression; the verifier checks for exactly 3 args
+       | 'fun' FunHead ReturnTypeAndBody     // [fun-exprs]
+       | 'true' | 'false' | 'null'
+       | id TypeArgs?                        // variable reference ('this' is an ordinary identifier)
+       | Number
+       | [annotations] AnnotationName Suffix* (BinOp SubExpr)*   // annotation used as a value
+       | ByteLiteral
+       | string
+       | '(' Expr,* ')'                      // tuple / parenthesized
+       | '[' Expr,* ']'                      // array literal
+       | '!' SubExpr                         // logical not
+       | '~' SubExpr                         // bitwise complement
+       | '-' SubExpr                         // negation ('-' followed by a digit is a negative literal)
+       | '--' SubExpr | '++' SubExpr         // prefix decrement / increment
+       | '_'                                 // partial application hole
+
+FunHead ::= id MethodParams                  // named function expression
+          | id ':' TypeRef                   // single typed param (currently broken; see Known Parser Issues)
+          | id                               // single untyped param
+          | MethodParams
+          | /* empty */
 
 BinOp ::=
-    // arithmetic
-    '+' | '-' | '*' | '/' | '%'
-    // bitwise
-    | '&' | '|' | '^' | '<<' | '>>' | '>>>'
-    // comparison
-    | '==' | '!=' | '<' | '<=' | '>' | '>='
-    // logical
-    | '&&' | '||'
-    // compound assignment
-    | '+=' | '-=' | '*=' | '/=' | '%='
-    | '&=' | '|=' | '^=' | '<<=' | '>>=' | '>>>='
+    '+' | '-' | '*' | '/' | '%'                         // arithmetic
+  | '&' | '|' | '^' | '<<' | '>>' | '>>>'               // bitwise ('>>' arithmetic, '>>>' logical)
+  | '==' | '!=' | '<' | '<=' | '>' | '>='               // comparison
+  | '&&' | '||'                                         // logical
+  | '+=' | '-=' | '*=' | '/=' | '%='                    // compound assignment
+  | '&=' | '|=' | '^=' | '<<=' | '>>=' | '>>>='
 ```
 
 ---
 
 ## Representation Hints
 
-Hints are attached to class, variant, enum, layout, and method declarations with `#`.
+```
+RepHints ::= RepHint*
+
+RepHint ::= '#' 'packing' ('(' PackingExpr,* ')' | PackingExpr)
+          | '#' HintName                       // boxed, unboxed, packed, big-endian, inline, no-inline
+          | '#' HintName '(' Expr,* ')'        // expression hint (other names only)
+          | '#' HintName '<' TypeRef,* '>'     // type hint (other names only)
+          | '#' HintName                       // any other name
+
+HintName ::= IdentStart (IdentMiddle | '-' | ':')*     // a keyword other than 'packing' is an error
+```
+
+Hints can be attached to classes, variants, variant cases (including `case _`), layouts, layout
+fields, fields, `var`/`def` locals, and method return types (after `-> T`, or before the body of a
+method with no return type). Enums and components cannot have hints.
+
+---
+
+## Annotations `[annotations]`
 
 ```
-RepHints ::= ('#' HintName HintArgs?)*
-
-HintName ::= id (with '-' or ':' allowed in middle, e.g. 'big-endian', 'no-inline')
-
-HintArgs ::= '<' TypeRef,* '>'          // type hint:  #label<T>
-           | '(' Expr,* ')'             // expr hint:  #label(e)
-           | PackingExpr                 // packing:    #packing(...)
-
-// Known hints: boxed, unboxed, packed, big-endian, inline, no-inline, packing(...)
+Annotation     ::= AnnotationName ('[' AnnArg,* ']')?   // not followed by '.'
+AnnotationName ::= '@' IdentStart IdentMiddle*          // must not be a keyword
+AnnArg         ::= Annotation* (id ':')? AnnValue?      // with no value and no 'id:', the last
+                                                        // annotation is the value
+AnnValue       ::= AnnotationName Suffix* (BinOp SubExpr)* | Expr
 ```
+
+`@name` followed by `.` is an annotation *reference* (an expression), not an annotation.
 
 ---
 
@@ -277,17 +313,34 @@ HintArgs ::= '<' TypeRef,* '>'          // type hint:  #label<T>
 
 ```
 id          ::= IdentStart IdentMiddle*
-IdentStart  ::= [a-zA-Z]               // '_' is NOT an ident-start; it is a standalone keyword token
+IdentStart  ::= [a-zA-Z]                  // '_' is NOT an ident-start; alone it is a separate token
 IdentMiddle ::= [a-zA-Z0-9_]
 
-DottedId    ::= (id TypeArgs? '.')* id TypeParams?   // no whitespace around '.'; qualifier parts may carry type args
+Number      ::= DecLiteral | HexLiteral | BinLiteral | FloatLiteral   // lib/util/NumberParser.v3
+              // 0x hex, 0b binary, fraction/exponent floats, '_' digit separators
+              // int suffixes: u/U, l/L, explicit widths uN / iN (e.g. u8, i64)
+              // float suffixes: f/F, d/D
+IntLiteral  ::= Number that is an integer
+string      ::= '"' (printable | escape)* '"'
+ByteLiteral ::= '\'' (printable | escape) '\''
 
-Number      ::= DecLiteral | HexLiteral | BinLiteral | FloatLiteral
-              // suffixes: u (unsigned), i8/i16/i32/i64, u8/u16/u32/u64, f32/f64
-              // '_' separators allowed in digits
+Whitespace  ::= ' ' | '\t' | '\n'
+Comment     ::= '//' ... end-of-line | '/*' ... '*/'      // block comments do not nest
+              // any other byte outside ' '..'~' (including '\r') is an "invalid character" error
 
 Keywords    ::= break case class component continue def descriptor describes
                 else enum export extends false for fun if import in layout
                 match new null packing private return struct super thread
                 true type var while
+              // 'this' is not a keyword
 ```
+
+---
+
+## Known Parser Issues
+
+- **`fun x: T` does not parse.** In `parseTerm` (`aeneas/src/vst/Parser.v3`, around line 1197), the
+  single-typed-parameter branch of a `fun` expression calls `parseTypeRef(p)` without first consuming
+  the `:`. As a result `def f = fun x: int => x + 1;` fails with `ParseError: identifier expected` at
+  the `:`. The workaround is the parenthesized form `fun (x: int) => x + 1`. The likely fix is to call
+  `p.advance1()` before `parseTypeRef`. No test covers this form. (Found 2026-11-23; not yet fixed.)
